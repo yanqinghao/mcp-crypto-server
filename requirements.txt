@@ -1,0 +1,7 @@
+fastmcp
+pandas
+numpy
+ccxt
+matplotlib
+influxdb-client
+langchain
