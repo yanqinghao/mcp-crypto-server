@@ -1,0 +1,7 @@
+{
+    "mcpServers": {
+        "mcp_sse": {
+            "url": "http://mcp-crypto-server:8000/sse"
+        }
+    }
+}

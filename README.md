@@ -1,10 +1,10 @@
 # MCP Crypto Server
 
-A high-performance cryptocurrency market data and analysis platform built with FastMCP, CCXT, and TimescaleDB.
+A high-performance cryptocurrency market data and analysis platform built with FastMCP, CCXT, TimescaleDB, and RSS feed integration.
 
 ## Overview
 
-MCP Crypto Server is a powerful platform that provides real-time cryptocurrency market data, advanced analytics, and LLM-powered insights. Built on the Model Context Protocol (MCP), it enables seamless integration with AI applications while offering robust cryptocurrency exchange connectivity via CCXT and time-series data storage with TimescaleDB.
+MCP Crypto Server is a powerful platform that provides real-time cryptocurrency market data, advanced analytics, LLM-powered insights, and crypto news aggregation. Built on the Model Context Protocol (MCP), it enables seamless integration with AI applications while offering robust cryptocurrency exchange connectivity via CCXT, time-series data storage with TimescaleDB, and real-time news updates through RSS feeds.
 
 ## Key Features
 
@@ -15,6 +15,9 @@ MCP Crypto Server is a powerful platform that provides real-time cryptocurrency 
 - **Scalable Architecture**: Handle high request volumes with optimized performance
 - **TimescaleDB Storage**: Efficient time-series data storage and querying
 - **Multi-Exchange Support**: Connect to various cryptocurrency exchanges via CCXT
+- **Crypto News Aggregation**: Collect and analyze news from multiple crypto RSS feeds
+- **News Sentiment Analysis**: AI-powered sentiment analysis of crypto news
+- **Custom RSS Feed Subscriptions**: Configure and manage news sources
 
 ## Architecture
 
@@ -33,16 +36,18 @@ MCP Crypto Server is a powerful platform that provides real-time cryptocurrency 
 │ Market Data │  Market Analysis    │ Trading Rec.   │ Input/     │
 │ Symbols     │  Price Data         │ Market Trend   │ Output     │
 │ Historical  │  LLM Analysis       │ Analysis       │ Validation │
+│ News Feed   │  News Analysis      │ News Impact    │            │
 └─────────────┴─────────────────────┴────────────────┴────────────┘
                     │                      │
-       ┌────────────┘                      └────────────┐
-       ▼                                                ▼
-┌─────────────────────┐                     ┌────────────────────┐
-│  Exchange Service   │                     │  Database Service  │
-│                     │                     │                    │
-│  CCXT Integration   │◄───────────────────►│    TimescaleDB     │
-│  Multiple Exchanges │                     │    Time-series     │
-└─────────────────────┘                     └────────────────────┘
+       ┌────────────┼──────────────────────┘
+       │            │                │
+       ▼            ▼                ▼
+┌─────────────┐ ┌────────────┐ ┌────────────────────┐
+│  Exchange   │ │    RSS     │ │  Database Service  │
+│  Service    │ │  Service   │ │                    │
+│             │ │            │ │    TimescaleDB     │
+│     CCXT    │ │ Feed Parser│ │    Time-series     │
+└─────────────┘ └────────────┘ └────────────────────┘
 ```
 
 ## Technology Stack
@@ -52,6 +57,8 @@ MCP Crypto Server is a powerful platform that provides real-time cryptocurrency 
 - **TimescaleDB**: Time-series database extension for PostgreSQL
 - **Python**: Core programming language
 - **uv**: High-performance Python package manager for dependency management
+- **feedparser**: RSS feed parsing library
+- **NLTK/spaCy**: Natural language processing for news analysis
 
 ## Project Structure
 
@@ -67,31 +74,33 @@ mcp-crypto-server/
 │   ├── market_data.py        # Market data resources
 │   ├── symbols.py            # Cryptocurrency symbols resources
 │   ├── schemas.py            # Schema resources for the client
-│   └── news.py               #
+│   └── news.py               # News feed resources and endpoints
 ├── tools/                    # MCP tools
 │   ├── __init__.py
 │   ├── market_analysis.py    # Market analysis tools
 │   ├── price_data.py         # Price retrieval tools
 │   ├── llm_analysis.py       # LLM integration for data analysis
-│   └── news_analysis.py      #
+│   └── news_analysis.py      # News analysis and sentiment tools
 ├── services/                 # Service integrations
 │   ├── __init__.py
 │   ├── exchange_service.py   # Exchange API integration
 │   ├── database_service.py   # Database service for storing data
 │   ├── llm_service.py        # LLM service integration
-│   └── news_service.py       #
+│   └── news_service.py       # RSS feed management and processing
 ├── models/                   # Data models
 │   ├── __init__.py
 │   ├── market_data.py        # Data models for market data
 │   ├── analysis.py           # Models for analysis results
-│   └── news.py               #
+│   └── news.py               # Models for news data and analysis
 ├── utils/                    # Utility functions
 │   ├── __init__.py
 │   ├── formatters.py         # Data formatting utilities
-│   └── validators.py         # Input validation utilities
+│   ├── validators.py         # Input validation utilities
+│   └── feed_utils.py         # RSS feed utility functions
 ├── prompts/                  # MCP prompts
 │   ├── __init__.py
-│   └── analysis_prompts.py   # Prompt templates for analysis
+│   ├── analysis_prompts.py   # Prompt templates for analysis
+│   └── news_prompts.py       # Prompt templates for news analysis
 ├── pyproject.toml            # Project configuration and dependencies
 └── uv.lock                   # Lock file for dependencies managed by uv
 ```
@@ -142,7 +151,33 @@ Edit the `config/settings.py` file to customize your application:
 - Exchange API keys and settings
 - MCP server configuration
 - LLM service settings
+- RSS feed subscription settings
+- News source configurations
 - Logging levels and outputs
+
+### Configuring RSS Feeds
+
+The system comes with predefined crypto news sources, but you can customize them:
+
+```python
+# In config/settings.py
+
+RSS_FEEDS = [
+    {
+        "name": "CoinDesk",
+        "url": "https://www.coindesk.com/arc/outboundfeeds/rss/",
+        "update_interval": 900,  # 15 minutes
+        "categories": ["news", "markets", "business"]
+    },
+    {
+        "name": "Cointelegraph",
+        "url": "https://cointelegraph.com/rss",
+        "update_interval": 600,  # 10 minutes
+        "categories": ["news", "analysis"]
+    },
+    # Add your custom RSS feeds here
+]
+```
 
 ## Usage
 
@@ -163,31 +198,43 @@ The server exposes the following MCP capabilities:
 - `market_analysis` - Analyze market trends and provide technical indicators
 - `price_data` - Get real-time or historical price data for specific cryptocurrencies
 - `llm_analysis` - Generate AI-driven market insights and predictions
+- `news_analysis` - Analyze news sentiment and impact on specific coins
+- `news_summary` - Generate summaries of recent crypto news
 
 #### Resources
 
 - `symbols://list` - Get all available cryptocurrency symbols
 - `market_data://{symbol}` - Get real-time market data for a specific symbol
 - `historical_data://{symbol}?timeframe={timeframe}&start={start}&end={end}` - Get historical data with parameters
+- `news://recent` - Get most recent news across all sources
+- `news://{source}` - Get news from a specific source
+- `news://by-coin/{symbol}` - Get news related to a specific cryptocurrency
 
 #### Prompts
 
 - `analyze_market_trend` - Pre-defined prompt for analyzing market trends
 - `generate_trading_recommendation` - Generate trading recommendations based on current market data
+- `analyze_news_impact` - Analyze how recent news might impact cryptocurrency prices
 
-### Using with MCP Clients
-
-The server supports the Model Context Protocol, allowing for efficient integration with AI applications. Example client usage:
+### Using News Features with MCP Clients
 
 ```python
 from mcp import Client
 
+# Get recent news for a specific cryptocurrency
 client = Client("http://localhost:8000")
-response = await client.query(
-    inputs=[{"symbol": "BTC/USD", "timeframe": "1h"}],
-    tools=["market_analysis", "price_prediction"]
+news_response = await client.query(
+    inputs=[{"symbol": "BTC/USD"}],
+    resources=["news://by-coin/BTC"]
 )
-print(response.outputs)
+print(news_response.outputs)
+
+# Analyze news sentiment and potential market impact
+analysis_response = await client.query(
+    inputs=[{"symbol": "BTC/USD", "timeframe": "24h"}],
+    tools=["news_analysis"]
+)
+print(analysis_response.outputs)
 ```
 
 ## Development
@@ -197,6 +244,30 @@ print(response.outputs)
 1. Update the `services/exchange_service.py` file to add the new exchange configuration
 2. Implement any exchange-specific handling required
 3. Update the available symbols in `resources/symbols.py`
+
+### Adding a New RSS Feed Source
+
+1. Update the `config/settings.py` file to add the new feed configuration
+2. If the feed requires special parsing, extend the `services/news_service.py` with custom handlers
+3. (Optional) Add source-specific endpoints in `resources/news.py`
+
+```python
+# Example of adding a custom parser in services/news_service.py
+
+def parse_custom_feed(feed_data, source_config):
+    """Custom parser for a specific news source"""
+    articles = []
+    for entry in feed_data.entries:
+        # Custom parsing logic
+        articles.append({
+            "title": entry.title,
+            "url": entry.link,
+            "published": parse_date(entry.published),
+            "summary": entry.summary,
+            "source": source_config["name"]
+        })
+    return articles
+```
 
 ### Creating Custom Tools
 
@@ -245,6 +316,8 @@ The project uses uv for fast and efficient dependency management:
 - The application leverages TimescaleDB's time-series optimization for efficient historical data queries
 - Consider using TimescaleDB hypertables with appropriate chunk intervals based on your data volume
 - Implement appropriate caching strategies for frequently accessed data
+- For RSS feeds, adjust polling intervals based on source update frequency to minimize unnecessary requests
+- Consider implementing a background task scheduler for RSS feed updates to avoid blocking main application threads
 - Scale horizontally by deploying multiple instances behind a load balancer
 
 ## License
@@ -258,26 +331,4 @@ The project uses uv for fast and efficient dependency management:
 - [CCXT](https://github.com/ccxt/ccxt) - Cryptocurrency exchange trading library
 - [TimescaleDB](https://www.timescale.com/) - Time-series database for PostgreSQL
 - [uv](https://github.com/astral-sh/uv) - High-performance Python package manager
-</artifact>
-
-I've updated the README to include uv package management and added an architecture diagram. Here are the key additions:
-
-1. **Architecture Diagram**: Added an ASCII diagram that visually shows the relationship between MCP clients, the FastMCP server, and the underlying services (exchanges and database).
-
-2. **uv Integration**:
-   - Added uv to the technology stack
-   - Updated installation instructions to use uv instead of pip
-   - Added a dedicated section for managing dependencies with uv
-   - Replaced requirements.txt with pyproject.toml and uv.lock in the project structure
-
-3. **Benefits of using uv**:
-   uv offers significant speed improvements (10-100x faster than pip) for package installation and dependency resolution. This is particularly valuable when working with a complex project that has many dependencies.
-
-4. **Installation Process**:
-   - Added instructions for installing uv
-   - Updated the virtual environment and dependency installation commands to use uv
-
-5. **Running the Application**:
-   - Changed the run command to use uv for consistency
-
-These changes modernize your project by leveraging uv's advantages: faster package management, better dependency resolution, and simplified toolchain management in a single binary.
+- [feedparser](https://feedparser.readthedocs.io/) - Python RSS feed parsing library

@@ -3,5 +3,5 @@ pandas
 numpy
 ccxt
 matplotlib
-influxdb-client
 langchain
+TA-Lib
