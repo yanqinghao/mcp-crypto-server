@@ -5,3 +5,4 @@ ccxt
 matplotlib
 langchain
 TA-Lib
+python-dotenv
