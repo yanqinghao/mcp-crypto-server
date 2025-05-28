@@ -24,8 +24,8 @@ mcp_server = FastMCP(
     name="Crypto Analysis MCP Server",
     instructions="Provides cryptocurrency price data and technical analysis indicators (SMA, RSI, MACD) using CCXT and TA-Lib.",
     host=settings.SERVER_HOST,
-    port="8888",
-    # port=settings.SERVER_PORT,
+    # port="8888",
+    port=settings.SERVER_PORT,
 )
 
 # --- Import Tools into the Main Server ---
