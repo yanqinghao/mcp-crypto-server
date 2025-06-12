@@ -4,12 +4,10 @@ from fastmcp import FastMCP  # Context is used in tools
 from config import settings
 
 # Import tools from their respective modules
-from tools.price_data import mcp as price_tools
-from tools.indicator_calculator import mcp as indicator_tools
-from tools.report_generator import mcp as report_tools
-
+from tools.crypto_tools import mcp as crypto_tools
+from tools.ak_stock_tools import mcp as ak_stock_tools
+from tools.us_stock_tools import mcp as us_stock_tools
 from prompts.analysis_prompts import mcp as analysis_prompts
-
 from resources.market_info_resources import mcp as market_info_resources
 
 
@@ -29,15 +27,11 @@ mcp_server = FastMCP(
 )
 
 # --- Import Tools into the Main Server ---
-mcp_server.mount("price", price_tools)
-
-mcp_server.mount("indicator", indicator_tools)
-
-mcp_server.mount("report", report_tools)
-
+mcp_server.mount("crypto_tools", crypto_tools)
+mcp_server.mount("a_hk_stock_tools", ak_stock_tools)
+mcp_server.mount("us_stock_tools", us_stock_tools)
 mcp_server.mount("analysis_prompts", analysis_prompts)
-
-mcp_server.mount("market_info", market_info_resources)
+mcp_server.mount("market_info_resources", market_info_resources)
 # logger.info(f"Imported tools: {list(mcp_server.get_tools())}")
 
 

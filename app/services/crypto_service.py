@@ -443,3 +443,26 @@ async def _fetch_and_prepare_multi_data_ohlcv(
         result[series_name] = [candle[series_index] for candle in ohlcv_data]
 
     return result
+
+
+async def search_crypto_by_name(
+    ctx: Context, base_currency: str, exchange_name: Optional[str] = None
+) -> Optional[List[str]]:
+    """根据币种名称搜索交易对"""
+    exchange = exchange_manager.get_exchange(exchange_name)
+    if not exchange:
+        return None
+
+    try:
+        await exchange.load_markets()
+
+        results = []
+        for symbol, market in exchange.markets.items():
+            if market["base"].lower() == base_currency.lower():
+                results.append(symbol)
+
+        return results
+
+    except Exception as e:
+        await ctx.error(f"Error searching crypto: {e}")
+        return None
