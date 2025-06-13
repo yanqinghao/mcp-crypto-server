@@ -1,7 +1,8 @@
 import numpy as np
 import talib
+import json
 from typing import Dict, Optional, List, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time
 
 from config import settings
 from models.analysis import (
@@ -268,7 +269,9 @@ async def get_a_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOutp
                         datetime.strptime(date_str, "%Y-%m-%d").timestamp() * 1000
                     )
                 else:
-                    timestamp = int(date_str.timestamp() * 1000)
+                    timestamp = int(
+                        datetime.combine(date_str, time()).timestamp() * 1000
+                    )
 
                 candle = OHLCVCandle(
                     timestamp=timestamp,
@@ -298,6 +301,9 @@ async def get_a_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOutp
             )
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         await ctx.error(f"Error fetching A-stock candles for {inputs.symbol}: {e}")
         return CandlesOutput(
             symbol=inputs.symbol,
@@ -951,18 +957,30 @@ async def generate_a_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=sma_period,
             )
-            sma_output = await calculate_a_stock_sma(ctx, sma_input)
-            indicator_results_structured["sma"] = sma_output.model_dump()
+            sma_output = await calculate_a_stock_sma.run(
+                {"ctx": ctx, "inputs": sma_input}
+            )
+            indicator_results_structured["sma"] = json.loads(
+                sma_output[0].model_dump()["text"]
+            )
 
-            if sma_output.sma is not None and len(sma_output.sma) > 0:
-                latest_sma = sma_output.sma[-1]
+            if (
+                indicator_results_structured["sma"]["sma"] is not None
+                and len(indicator_results_structured["sma"]["sma"]) > 0
+            ):
+                latest_sma = indicator_results_structured["sma"]["sma"][-1]
                 report_sections.append(
-                    f"- A股SMA({sma_output.period}): ¥{latest_sma:.2f} (最新值)"
+                    f"- A股SMA({indicator_results_structured['sma']['period']}): ¥{latest_sma:.2f} (最新值)"
                 )
-                if len(sma_output.sma) > 1:
-                    trend = "↗" if sma_output.sma[-1] > sma_output.sma[-2] else "↘"
+                if len(indicator_results_structured["sma"]["sma"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["sma"]["sma"][-1]
+                        > indicator_results_structured["sma"]["sma"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - 趋势: {trend} ({len(sma_output.sma)} 个数据点)"
+                        f"  - 趋势: {trend} ({len(indicator_results_structured['sma']['sma'])} 个数据点)"
                     )
             elif sma_output.error:
                 report_sections.append(f"- A股SMA: 错误 - {sma_output.error}")
@@ -976,23 +994,35 @@ async def generate_a_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=rsi_period,
             )
-            rsi_output = await calculate_a_stock_rsi(ctx, rsi_input)
-            indicator_results_structured["rsi"] = rsi_output.model_dump()
+            rsi_output = await calculate_a_stock_rsi.run(
+                {"ctx": ctx, "inputs": rsi_input}
+            )
+            indicator_results_structured["rsi"] = json.loads(
+                rsi_output[0].model_dump()["text"]
+            )
 
-            if rsi_output.rsi is not None and len(rsi_output.rsi) > 0:
-                latest_rsi = rsi_output.rsi[-1]
+            if (
+                indicator_results_structured["rsi"]["rsi"] is not None
+                and len(indicator_results_structured["rsi"]["rsi"]) > 0
+            ):
+                latest_rsi = indicator_results_structured["rsi"]["rsi"][-1]
                 report_sections.append(
-                    f"- A股RSI({rsi_output.period}): {latest_rsi:.2f}"
+                    f"- A股RSI({indicator_results_structured['rsi']['period']}): {latest_rsi:.2f}"
                 )
                 if latest_rsi > 70:
                     report_sections.append("  - 注意: RSI表明超买状态 (>70)")
                 elif latest_rsi < 30:
                     report_sections.append("  - 注意: RSI表明超卖状态 (<30)")
 
-                if len(rsi_output.rsi) > 1:
-                    trend = "↗" if rsi_output.rsi[-1] > rsi_output.rsi[-2] else "↘"
+                if len(indicator_results_structured["rsi"]["rsi"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["rsi"]["rsi"][-1]
+                        > indicator_results_structured["rsi"]["rsi"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - 趋势: {trend} ({len(rsi_output.rsi)} 个数据点)"
+                        f"  - 趋势: {trend} ({len(indicator_results_structured['rsi']['rsi'])} 个数据点)"
                     )
             elif rsi_output.error:
                 report_sections.append(f"- A股RSI: 错误 - {rsi_output.error}")
@@ -1007,23 +1037,27 @@ async def generate_a_stock_comprehensive_report(
                 slow_period=inputs.macd_slow_period or settings.DEFAULT_MACD_SLOW,
                 signal_period=inputs.macd_signal_period or settings.DEFAULT_MACD_SIGNAL,
             )
-            macd_output = await calculate_a_stock_macd(ctx, macd_input)
-            indicator_results_structured["macd"] = macd_output.model_dump()
+            macd_output = await calculate_a_stock_macd.run(
+                {"ctx": ctx, "inputs": macd_input}
+            )
+            indicator_results_structured["macd"] = json.loads(
+                macd_output[0].model_dump()["text"]
+            )
 
             if (
-                macd_output.macd is not None
-                and len(macd_output.macd) > 0
-                and macd_output.signal is not None
-                and len(macd_output.signal) > 0
-                and macd_output.histogram is not None
-                and len(macd_output.histogram) > 0
+                indicator_results_structured["macd"]["macd"] is not None
+                and len(indicator_results_structured["macd"]["macd"]) > 0
+                and indicator_results_structured["macd"]["signal"] is not None
+                and len(indicator_results_structured["macd"]["signal"]) > 0
+                and indicator_results_structured["macd"]["histogram"] is not None
+                and len(indicator_results_structured["macd"]["histogram"]) > 0
             ):
-                latest_macd = macd_output.macd[-1]
-                latest_signal = macd_output.signal[-1]
-                latest_hist = macd_output.histogram[-1]
+                latest_macd = indicator_results_structured["macd"]["macd"][-1]
+                latest_signal = indicator_results_structured["macd"]["signal"][-1]
+                latest_hist = indicator_results_structured["macd"]["histogram"][-1]
 
                 report_sections.append(
-                    f"- A股MACD({macd_output.fast_period},{macd_output.slow_period},{macd_output.signal_period}): "
+                    f"- A股MACD({indicator_results_structured['macd']['fast_period']},{indicator_results_structured['macd']['slow_period']},{indicator_results_structured['macd']['signal_period']}): "
                     f"MACD: {latest_macd:.4f}, 信号线: {latest_signal:.4f}, 柱状图: {latest_hist:.4f}"
                 )
 
@@ -1043,23 +1077,29 @@ async def generate_a_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=inputs.bbands_period or settings.DEFAULT_BBANDS_PERIOD,
             )
-            bbands_output = await calculate_a_stock_bbands(ctx, bbands_input)
-            indicator_results_structured["bbands"] = bbands_output.model_dump()
+            bbands_output = await calculate_a_stock_bbands.run(
+                {"ctx": ctx, "inputs": bbands_input}
+            )
+            indicator_results_structured["bbands"] = json.loads(
+                bbands_output[0].model_dump()["text"]
+            )
 
             if (
-                bbands_output.upper_band is not None
-                and len(bbands_output.upper_band) > 0
-                and bbands_output.middle_band is not None
-                and len(bbands_output.middle_band) > 0
-                and bbands_output.lower_band is not None
-                and len(bbands_output.lower_band) > 0
+                indicator_results_structured["bbands"]["upper_band"] is not None
+                and len(indicator_results_structured["bbands"]["upper_band"]) > 0
+                and indicator_results_structured["bbands"]["middle_band"] is not None
+                and len(indicator_results_structured["bbands"]["middle_band"]) > 0
+                and indicator_results_structured["bbands"]["lower_band"] is not None
+                and len(indicator_results_structured["bbands"]["lower_band"]) > 0
             ):
-                latest_upper = bbands_output.upper_band[-1]
-                latest_middle = bbands_output.middle_band[-1]
-                latest_lower = bbands_output.lower_band[-1]
+                latest_upper = indicator_results_structured["bbands"]["upper_band"][-1]
+                latest_middle = indicator_results_structured["bbands"]["middle_band"][
+                    -1
+                ]
+                latest_lower = indicator_results_structured["bbands"]["lower_band"][-1]
 
                 report_sections.append(
-                    f"- A股布林带({bbands_output.period}): "
+                    f"- A股布林带({indicator_results_structured['bbands']['period']}): "
                     f"上轨: ¥{latest_upper:.2f}, 中轨: ¥{latest_middle:.2f}, 下轨: ¥{latest_lower:.2f}"
                 )
                 report_sections.append(f"  - 带宽: ¥{latest_upper - latest_lower:.2f}")
@@ -1112,6 +1152,9 @@ async def generate_a_stock_comprehensive_report(
         )
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         await ctx.error(
             f"Error in A-stock comprehensive report for {inputs.symbol}: {e}",
         )
@@ -1153,18 +1196,30 @@ async def generate_hk_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=sma_period,
             )
-            sma_output = await calculate_hk_stock_sma(ctx, sma_input)
-            indicator_results_structured["sma"] = sma_output.model_dump()
+            sma_output = await calculate_hk_stock_sma.run(
+                {"ctx": ctx, "inputs": sma_input}
+            )
+            indicator_results_structured["sma"] = json.loads(
+                sma_output[0].model_dump()["text"]
+            )
 
-            if sma_output.sma is not None and len(sma_output.sma) > 0:
-                latest_sma = sma_output.sma[-1]
+            if (
+                indicator_results_structured["sma"]["sma"] is not None
+                and len(indicator_results_structured["sma"]["sma"]) > 0
+            ):
+                latest_sma = indicator_results_structured["sma"]["sma"][-1]
                 report_sections.append(
-                    f"- 港股SMA({sma_output.period}): HK${latest_sma:.2f} (最新值)"
+                    f"- 港股SMA({indicator_results_structured['sma']['period']}): HK${latest_sma:.2f} (最新值)"
                 )
-                if len(sma_output.sma) > 1:
-                    trend = "↗" if sma_output.sma[-1] > sma_output.sma[-2] else "↘"
+                if len(indicator_results_structured["sma"]["sma"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["sma"]["sma"][-1]
+                        > indicator_results_structured["sma"]["sma"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - 趋势: {trend} ({len(sma_output.sma)} 个数据点)"
+                        f"  - 趋势: {trend} ({len(indicator_results_structured['sma']['sma'])} 个数据点)"
                     )
             elif sma_output.error:
                 report_sections.append(f"- 港股SMA: 错误 - {sma_output.error}")
@@ -1178,23 +1233,35 @@ async def generate_hk_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=rsi_period,
             )
-            rsi_output = await calculate_hk_stock_rsi(ctx, rsi_input)
-            indicator_results_structured["rsi"] = rsi_output.model_dump()
+            rsi_output = await calculate_hk_stock_rsi.run(
+                {"ctx": ctx, "inputs": rsi_input}
+            )
+            indicator_results_structured["rsi"] = json.loads(
+                rsi_output[0].model_dump()["text"]
+            )
 
-            if rsi_output.rsi is not None and len(rsi_output.rsi) > 0:
-                latest_rsi = rsi_output.rsi[-1]
+            if (
+                indicator_results_structured["rsi"]["rsi"] is not None
+                and len(indicator_results_structured["rsi"]["rsi"]) > 0
+            ):
+                latest_rsi = indicator_results_structured["rsi"]["rsi"][-1]
                 report_sections.append(
-                    f"- 港股RSI({rsi_output.period}): {latest_rsi:.2f}"
+                    f"- 港股RSI({indicator_results_structured['rsi']['period']}): {latest_rsi:.2f}"
                 )
                 if latest_rsi > 70:
                     report_sections.append("  - 注意: RSI表明超买状态 (>70)")
                 elif latest_rsi < 30:
                     report_sections.append("  - 注意: RSI表明超卖状态 (<30)")
 
-                if len(rsi_output.rsi) > 1:
-                    trend = "↗" if rsi_output.rsi[-1] > rsi_output.rsi[-2] else "↘"
+                if len(indicator_results_structured["rsi"]["rsi"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["rsi"]["rsi"][-1]
+                        > indicator_results_structured["rsi"]["rsi"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - 趋势: {trend} ({len(rsi_output.rsi)} 个数据点)"
+                        f"  - 趋势: {trend} ({len(indicator_results_structured['rsi']['rsi'])} 个数据点)"
                     )
             elif rsi_output.error:
                 report_sections.append(f"- 港股RSI: 错误 - {rsi_output.error}")

@@ -487,18 +487,17 @@ async def fetch_stock_symbol_mapping(ctx: Context) -> Optional[Dict[str, str]]:
         mapping = {}
         # 处理上海交易所数据
         for _, row in sh_df.iterrows():
-            name = row.get("公司简称", "")
-            code = row.get("公司代码", "")
+            name = row.get("证券简称", "")
+            code = row.get("证券代码", "")
             if name and code:
                 mapping[name] = code
 
         # 处理深圳交易所数据
         for _, row in sz_df.iterrows():
-            name = row.get("公司简称", "")
-            code = row.get("公司代码", "")
+            name = row.get("A股简称", "")
+            code = row.get("A股代码", "")
             if name and code:
                 mapping[name] = code
-
         return mapping
     except Exception as e:
         await ctx.error(f"Error fetching stock mapping: {e}")
