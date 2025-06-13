@@ -410,9 +410,9 @@ async def fetch_us_stock_financials(
                     try:
                         value = df.loc[idx, col]
                         if pd.notna(value):
-                            period_data[str(idx)] = float(value)
+                            period_data[str(idx)] = str(float(value))
                     except (ValueError, TypeError):
-                        period_data[str(idx)] = None
+                        period_data[str(idx)] = ""
                 result.append(period_data)
 
             await ctx.info(f"Successfully fetched {statement_type} data for {symbol}")

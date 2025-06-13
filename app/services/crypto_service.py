@@ -19,6 +19,7 @@ class ExchangeManager:
     def __init__(self):
         self._exchanges = {}
         self._default_exchange = None
+        self.symbols = []
 
     def add_exchange(
         self, name: str, exchange_config: Dict[str, Any], is_default: bool = False
@@ -120,7 +121,7 @@ async def fetch_ohlcv_data(
             )
 
             # 检查交易所是否支持该交易对
-            if symbol not in exchange.symbols:
+            if not exchange.symbols or symbol not in exchange.symbols:
                 # 尝试加载市场信息
                 try:
                     await exchange.load_markets()
@@ -130,7 +131,6 @@ async def fetch_ohlcv_data(
                 except Exception as e:
                     await ctx.error(f"Failed to load markets: {e}")
                     return None
-
             # 获取OHLCV数据
             ohlcv_data = await exchange.fetch_ohlcv(
                 symbol=symbol, timeframe=timeframe, since=since, limit=limit
@@ -181,6 +181,10 @@ async def fetch_ohlcv_data(
             return None
 
         except Exception as e:
+            import traceback
+
+            traceback.print_exc()
+
             await ctx.error(f"Unexpected error fetching {symbol} data: {e}")
             if attempt < max_retries:
                 await asyncio.sleep(retry_delay)

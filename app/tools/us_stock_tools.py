@@ -581,9 +581,7 @@ async def calculate_us_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
         return SmaOutput(**output_base, sma=valid_sma)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in US stock SMA calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in US stock SMA calculation for {inputs.symbol}: {e}")
         return SmaOutput(**output_base, error="US stock SMA calculation error.")
 
 
@@ -633,9 +631,7 @@ async def calculate_us_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
         return RsiOutput(**output_base, rsi=valid_rsi)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in US stock RSI calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in US stock RSI calculation for {inputs.symbol}: {e}")
         return RsiOutput(**output_base, error="US stock RSI calculation error.")
 
 
@@ -701,7 +697,6 @@ async def calculate_us_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput
     except Exception as e:
         await ctx.error(
             f"Error in US stock MACD calculation for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return MacdOutput(**output_base, error="US stock MACD calculation error.")
 
@@ -771,7 +766,6 @@ async def calculate_us_stock_bbands(ctx: Context, inputs: BbandsInput) -> Bbands
     except Exception as e:
         await ctx.error(
             f"Error in US stock Bollinger Bands calculation for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return BbandsOutput(
             **output_base, error="US stock Bollinger Bands calculation error."
@@ -839,9 +833,7 @@ async def calculate_us_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
         return AtrOutput(**output_base, atr=valid_atr)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in US stock ATR calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in US stock ATR calculation for {inputs.symbol}: {e}")
         return AtrOutput(**output_base, error="US stock ATR calculation error.")
 
 
@@ -1082,7 +1074,6 @@ async def generate_us_stock_comprehensive_report(
     except Exception as e:
         await ctx.error(
             f"Error in US stock comprehensive report for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"US stock comprehensive analysis error: {str(e)}"

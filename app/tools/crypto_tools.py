@@ -1,5 +1,6 @@
 import numpy as np
 import talib
+import json
 from typing import Dict, Optional, List, Any
 
 from config import settings
@@ -79,6 +80,9 @@ async def _fetch_single_series_data(
         ohlcv_data = await fetch_ohlcv_data(ctx, symbol, timeframe, fetch_size)
 
         if not ohlcv_data or len(ohlcv_data) < required_candles:
+            import traceback
+
+            traceback.print_exc()
             await ctx.error(
                 f"Insufficient data for {symbol}: got {len(ohlcv_data) if ohlcv_data else 0}, need {required_candles}"
             )
@@ -89,6 +93,9 @@ async def _fetch_single_series_data(
 
         if series_type not in series_index_map:
             await ctx.error(f"Invalid series type: {series_type}")
+            import traceback
+
+            traceback.print_exc()
             return None
 
         series_index = series_index_map[series_type]
@@ -105,6 +112,9 @@ async def _fetch_single_series_data(
         return data_series
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         await ctx.error(f"Error fetching {series_type} data for {symbol}: {e}")
         return None
 
@@ -250,9 +260,7 @@ async def calculate_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
             **output_base, error=f"Exchange/Network Error: {type(e).__name__}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error in calculate_sma for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error in calculate_sma for {inputs.symbol}: {e}")
         return SmaOutput(**output_base, error="An unexpected server error occurred.")
 
 
@@ -302,9 +310,7 @@ async def calculate_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
             **output_base, error=f"Exchange/Network Error: {type(e).__name__}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error in calculate_rsi for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error in calculate_rsi for {inputs.symbol}: {e}")
         return RsiOutput(**output_base, error="An unexpected server error occurred.")
 
 
@@ -370,7 +376,6 @@ async def calculate_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
     except Exception as e:
         await ctx.error(
             f"Unexpected error in calculate_macd for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return MacdOutput(**output_base, error="An unexpected server error occurred.")
 
@@ -439,7 +444,6 @@ async def calculate_bbands(ctx: Context, inputs: BbandsInput) -> BbandsOutput:
     except Exception as e:
         await ctx.error(
             f"Unexpected error in calculate_bbands for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return BbandsOutput(**output_base, error="An unexpected server error occurred.")
 
@@ -506,9 +510,7 @@ async def calculate_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
             **output_base, error=f"Exchange/Network Error: {type(e).__name__}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error in calculate_atr for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error in calculate_atr for {inputs.symbol}: {e}")
         return AtrOutput(**output_base, error="An unexpected server error occurred.")
 
 
@@ -583,9 +585,7 @@ async def calculate_adx(ctx: Context, inputs: AdxInput) -> AdxOutput:
             **output_base, error=f"Exchange/Network Error: {type(e).__name__}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error in calculate_adx for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error in calculate_adx for {inputs.symbol}: {e}")
         return AdxOutput(**output_base, error="An unexpected server error occurred.")
 
 
@@ -644,9 +644,7 @@ async def calculate_obv(ctx: Context, inputs: ObvInput) -> ObvOutput:
             **output_base, error=f"Exchange/Network Error: {type(e).__name__}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error in calculate_obv for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error in calculate_obv for {inputs.symbol}: {e}")
         return ObvOutput(**output_base, error="An unexpected server error occurred.")
 
 
@@ -696,9 +694,7 @@ async def get_candles(ctx: Context, inputs: CandlesInput) -> CandlesOutput:
             error=f"Exchange/Network Error: {str(e)}",
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error fetching candles for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error fetching candles for {inputs.symbol}: {e}")
         return CandlesOutput(
             symbol=inputs.symbol,
             timeframe=inputs.timeframe.value,
@@ -731,9 +727,7 @@ async def get_current_price(inputs: PriceInput, ctx: Context) -> PriceOutput:
             symbol=inputs.symbol, error=f"Exchange/Network Error: {str(e)}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error fetching price for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error fetching price for {inputs.symbol}: {e}")
         return PriceOutput(
             symbol=inputs.symbol, error="An unexpected server error occurred."
         )
@@ -773,9 +767,7 @@ async def get_ticker(ctx: Context, inputs: TickerInput) -> TickerOutput:
             symbol=inputs.symbol, error=f"Exchange/Network Error: {str(e)}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error fetching ticker for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error fetching ticker for {inputs.symbol}: {e}")
         return TickerOutput(
             symbol=inputs.symbol, error="An unexpected server error occurred."
         )
@@ -820,7 +812,6 @@ async def get_order_book(ctx: Context, inputs: OrderBookInput) -> OrderBookOutpu
     except Exception as e:
         await ctx.error(
             f"Unexpected error fetching order book for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return OrderBookOutput(
             symbol=inputs.symbol, error="An unexpected server error occurred."
@@ -863,9 +854,7 @@ async def get_recent_trades(ctx: Context, inputs: TradesInput) -> TradesOutput:
             symbol=inputs.symbol, error=f"Exchange/Network Error: {str(e)}"
         )
     except Exception as e:
-        await ctx.error(
-            f"Unexpected error fetching trades for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Unexpected error fetching trades for {inputs.symbol}: {e}")
         return TradesOutput(
             symbol=inputs.symbol, error="An unexpected server error occurred."
         )
@@ -905,21 +894,33 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 period=sma_period,
             )
-            sma_output = await calculate_sma(ctx, sma_input)
-            indicator_results_structured["sma"] = sma_output.model_dump()
+            sma_output = await calculate_sma.run({"ctx": ctx, "inputs": sma_input})
+            indicator_results_structured["sma"] = json.loads(
+                sma_output[0].model_dump()["text"]
+            )
 
-            if sma_output.sma is not None and len(sma_output.sma) > 0:
-                latest_sma = sma_output.sma[-1]
+            if (
+                indicator_results_structured["sma"]["sma"] is not None
+                and len(indicator_results_structured["sma"]["sma"]) > 0
+            ):
+                latest_sma = indicator_results_structured["sma"]["sma"][-1]
                 report_sections.append(
-                    f"- SMA({sma_output.period}): {latest_sma:.4f} (Latest)"
+                    f"- SMA({indicator_results_structured['sma']['period']}): {latest_sma:.4f} (Latest)"
                 )
-                if len(sma_output.sma) > 1:
-                    trend = "↗" if sma_output.sma[-1] > sma_output.sma[-2] else "↘"
-                    report_sections.append(
-                        f"  - Trend: {trend} ({len(sma_output.sma)} data points)"
+                if len(indicator_results_structured["sma"]["sma"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["sma"]["sma"][-1]
+                        > indicator_results_structured["sma"]["sma"][-2]
+                        else "↘"
                     )
-            elif sma_output.error:
-                report_sections.append(f"- SMA: Error - {sma_output.error}")
+                    report_sections.append(
+                        f"  - Trend: {trend} ({len(indicator_results_structured['sma']['sma'])} data points)"
+                    )
+            elif indicator_results_structured["sma"].get("error"):
+                report_sections.append(
+                    f"- SMA: Error - {indicator_results_structured['sma']['error']}"
+                )
 
         # --- RSI ---
         if "RSI" in indicators_to_run:
@@ -930,12 +931,19 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 period=rsi_period,
             )
-            rsi_output = await calculate_rsi(ctx, rsi_input)
-            indicator_results_structured["rsi"] = rsi_output.model_dump()
+            rsi_output = await calculate_rsi.run({"ctx": ctx, "inputs": rsi_input})
+            indicator_results_structured["rsi"] = json.loads(
+                rsi_output[0].model_dump()["text"]
+            )
 
-            if rsi_output.rsi is not None and len(rsi_output.rsi) > 0:
-                latest_rsi = rsi_output.rsi[-1]
-                report_sections.append(f"- RSI({rsi_output.period}): {latest_rsi:.2f}")
+            if (
+                indicator_results_structured["rsi"]["rsi"] is not None
+                and len(indicator_results_structured["rsi"]["rsi"]) > 0
+            ):
+                latest_rsi = indicator_results_structured["rsi"]["rsi"][-1]
+                report_sections.append(
+                    f"- RSI({indicator_results_structured['rsi']['period']}): {latest_rsi:.2f}"
+                )
                 if latest_rsi > 70:
                     report_sections.append(
                         "  - Note: RSI suggests overbought conditions (>70)."
@@ -946,13 +954,20 @@ async def generate_comprehensive_market_report(
                     )
 
                 # Add trend analysis if we have multiple data points
-                if len(rsi_output.rsi) > 1:
-                    trend = "↗" if rsi_output.rsi[-1] > rsi_output.rsi[-2] else "↘"
-                    report_sections.append(
-                        f"  - Trend: {trend} ({len(rsi_output.rsi)} data points)"
+                if len(indicator_results_structured["rsi"]["rsi"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["rsi"]["rsi"][-1]
+                        > indicator_results_structured["rsi"]["rsi"][-2]
+                        else "↘"
                     )
-            elif rsi_output.error:
-                report_sections.append(f"- RSI: Error - {rsi_output.error}")
+                    report_sections.append(
+                        f"  - Trend: {trend} ({len(indicator_results_structured['rsi']['rsi'])} data points)"
+                    )
+            elif indicator_results_structured["rsi"].get("error"):
+                report_sections.append(
+                    f"- RSI: Error - {indicator_results_structured['rsi']['error']}"
+                )
 
         # --- MACD ---
         if "MACD" in indicators_to_run:
@@ -964,23 +979,25 @@ async def generate_comprehensive_market_report(
                 slow_period=inputs.macd_slow_period or settings.DEFAULT_MACD_SLOW,
                 signal_period=inputs.macd_signal_period or settings.DEFAULT_MACD_SIGNAL,
             )
-            macd_output = await calculate_macd(ctx, macd_input)
-            indicator_results_structured["macd"] = macd_output.model_dump()
+            macd_output = await calculate_macd.run({"ctx": ctx, "inputs": macd_input})
+            indicator_results_structured["macd"] = json.loads(
+                macd_output[0].model_dump()["text"]
+            )
 
             if (
-                macd_output.macd is not None
-                and len(macd_output.macd) > 0
-                and macd_output.signal is not None
-                and len(macd_output.signal) > 0
-                and macd_output.histogram is not None
-                and len(macd_output.histogram) > 0
+                indicator_results_structured["macd"]["macd"] is not None
+                and len(indicator_results_structured["macd"]["macd"]) > 0
+                and indicator_results_structured["macd"]["signal"] is not None
+                and len(indicator_results_structured["macd"]["signal"]) > 0
+                and indicator_results_structured["macd"]["histogram"] is not None
+                and len(indicator_results_structured["macd"]["histogram"]) > 0
             ):
-                latest_macd = macd_output.macd[-1]
-                latest_signal = macd_output.signal[-1]
-                latest_hist = macd_output.histogram[-1]
+                latest_macd = indicator_results_structured["macd"]["macd"][-1]
+                latest_signal = indicator_results_structured["macd"]["signal"][-1]
+                latest_hist = indicator_results_structured["macd"]["histogram"][-1]
 
                 report_sections.append(
-                    f"- MACD({macd_output.fast_period},{macd_output.slow_period},{macd_output.signal_period}): "
+                    f"- MACD({indicator_results_structured['macd']['fast_period']},{indicator_results_structured['macd']['slow_period']},{indicator_results_structured['macd']['signal_period']}): "
                     f"MACD: {latest_macd:.4f}, Signal: {latest_signal:.4f}, Hist: {latest_hist:.4f}"
                 )
 
@@ -994,18 +1011,21 @@ async def generate_comprehensive_market_report(
                     )
 
                 # Add trend analysis
-                if len(macd_output.histogram) > 1:
+                if len(indicator_results_structured["macd"]["histogram"]) > 1:
                     hist_trend = (
                         "↗"
-                        if macd_output.histogram[-1] > macd_output.histogram[-2]
+                        if indicator_results_structured["macd"]["histogram"][-1]
+                        > indicator_results_structured["macd"]["histogram"][-2]
                         else "↘"
                     )
                     report_sections.append(
-                        f"  - Histogram Trend: {hist_trend} ({len(macd_output.histogram)} data points)"
+                        f"  - Histogram Trend: {hist_trend} ({len(indicator_results_structured['macd']['histogram'])} data points)"
                     )
 
-            elif macd_output.error:
-                report_sections.append(f"- MACD: Error - {macd_output.error}")
+            elif indicator_results_structured["macd"].get("error"):
+                report_sections.append(
+                    f"- MACD: Error - {indicator_results_structured['macd']['error']}"
+                )
 
         # --- Bollinger Bands (BBANDS) ---
         if "BBANDS" in indicators_to_run:
@@ -1015,23 +1035,29 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 period=inputs.bbands_period or settings.DEFAULT_BBANDS_PERIOD,
             )
-            bbands_output = await calculate_bbands(ctx, bbands_input)
-            indicator_results_structured["bbands"] = bbands_output.model_dump()
+            bbands_output = await calculate_bbands.run(
+                {"ctx": ctx, "inputs": bbands_input}
+            )
+            indicator_results_structured["bbands"] = json.loads(
+                bbands_output[0].model_dump()["text"]
+            )
 
             if (
-                bbands_output.upper_band is not None
-                and len(bbands_output.upper_band) > 0
-                and bbands_output.middle_band is not None
-                and len(bbands_output.middle_band) > 0
-                and bbands_output.lower_band is not None
-                and len(bbands_output.lower_band) > 0
+                indicator_results_structured["bbands"]["upper_band"] is not None
+                and len(indicator_results_structured["bbands"]["upper_band"]) > 0
+                and indicator_results_structured["bbands"]["middle_band"] is not None
+                and len(indicator_results_structured["bbands"]["middle_band"]) > 0
+                and indicator_results_structured["bbands"]["lower_band"] is not None
+                and len(indicator_results_structured["bbands"]["lower_band"]) > 0
             ):
-                latest_upper = bbands_output.upper_band[-1]
-                latest_middle = bbands_output.middle_band[-1]
-                latest_lower = bbands_output.lower_band[-1]
+                latest_upper = indicator_results_structured["bbands"]["upper_band"][-1]
+                latest_middle = indicator_results_structured["bbands"]["middle_band"][
+                    -1
+                ]
+                latest_lower = indicator_results_structured["bbands"]["lower_band"][-1]
 
                 report_sections.append(
-                    f"- Bollinger Bands({bbands_output.period}, {bbands_output.nbdevup}dev): "
+                    f"- Bollinger Bands({indicator_results_structured['bbands']['period']}, {indicator_results_structured['bbands']['nbdevup']}dev): "
                     f"Upper: {latest_upper:.4f}, Middle: {latest_middle:.4f}, Lower: {latest_lower:.4f}"
                 )
                 report_sections.append(
@@ -1039,18 +1065,21 @@ async def generate_comprehensive_market_report(
                 )
 
                 # Add trend analysis
-                if len(bbands_output.middle_band) > 1:
+                if len(indicator_results_structured["bbands"]["middle_band"]) > 1:
                     trend = (
                         "↗"
-                        if bbands_output.middle_band[-1] > bbands_output.middle_band[-2]
+                        if indicator_results_structured["bbands"]["middle_band"][-1]
+                        > indicator_results_structured["bbands"]["middle_band"][-2]
                         else "↘"
                     )
                     report_sections.append(
-                        f"  - Middle Band Trend: {trend} ({len(bbands_output.middle_band)} data points)"
+                        f"  - Middle Band Trend: {trend} ({len(indicator_results_structured['bbands']['middle_band'])} data points)"
                     )
 
-            elif bbands_output.error:
-                report_sections.append(f"- BBANDS: Error - {bbands_output.error}")
+            elif indicator_results_structured["bbands"].get("error"):
+                report_sections.append(
+                    f"- BBANDS: Error - {indicator_results_structured['bbands']['error']}"
+                )
 
         # --- Average True Range (ATR) ---
         if "ATR" in indicators_to_run:
@@ -1060,24 +1089,36 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 period=inputs.atr_period or settings.DEFAULT_ATR_PERIOD,
             )
-            atr_output = await calculate_atr(ctx, atr_input)
-            indicator_results_structured["atr"] = atr_output.model_dump()
+            atr_output = await calculate_atr.run({"ctx": ctx, "inputs": atr_input})
+            indicator_results_structured["atr"] = json.loads(
+                atr_output[0].model_dump()["text"]
+            )
 
-            if atr_output.atr is not None and len(atr_output.atr) > 0:
-                latest_atr = atr_output.atr[-1]
+            if (
+                indicator_results_structured["atr"]["atr"] is not None
+                and len(indicator_results_structured["atr"]["atr"]) > 0
+            ):
+                latest_atr = indicator_results_structured["atr"]["atr"][-1]
                 report_sections.append(
-                    f"- ATR({atr_output.period}): {latest_atr:.4f} (Volatility Measure)"
+                    f"- ATR({indicator_results_structured['atr']['period']}): {latest_atr:.4f} (Volatility Measure)"
                 )
 
                 # Add trend analysis for volatility
-                if len(atr_output.atr) > 1:
-                    vol_trend = "↗" if atr_output.atr[-1] > atr_output.atr[-2] else "↘"
+                if len(indicator_results_structured["atr"]["atr"]) > 1:
+                    vol_trend = (
+                        "↗"
+                        if indicator_results_structured["atr"]["atr"][-1]
+                        > indicator_results_structured["atr"]["atr"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - Volatility Trend: {vol_trend} ({len(atr_output.atr)} data points)"
+                        f"  - Volatility Trend: {vol_trend} ({len(indicator_results_structured['atr']['atr'])} data points)"
                     )
 
-            elif atr_output.error:
-                report_sections.append(f"- ATR: Error - {atr_output.error}")
+            elif indicator_results_structured["atr"].get("error"):
+                report_sections.append(
+                    f"- ATR: Error - {indicator_results_structured['atr']['error']}"
+                )
 
         # --- Average Directional Index (ADX) ---
         if "ADX" in indicators_to_run:
@@ -1087,23 +1128,25 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 period=inputs.adx_period or settings.DEFAULT_ADX_PERIOD,
             )
-            adx_output = await calculate_adx(ctx, adx_input)
-            indicator_results_structured["adx"] = adx_output.model_dump()
+            adx_output = await calculate_adx.run({"ctx": ctx, "inputs": adx_input})
+            indicator_results_structured["adx"] = json.loads(
+                adx_output[0].model_dump()["text"]
+            )
 
             if (
-                adx_output.adx is not None
-                and len(adx_output.adx) > 0
-                and adx_output.plus_di is not None
-                and len(adx_output.plus_di) > 0
-                and adx_output.minus_di is not None
-                and len(adx_output.minus_di) > 0
+                indicator_results_structured["adx"]["adx"] is not None
+                and len(indicator_results_structured["adx"]["adx"]) > 0
+                and indicator_results_structured["adx"]["plus_di"] is not None
+                and len(indicator_results_structured["adx"]["plus_di"]) > 0
+                and indicator_results_structured["adx"]["minus_di"] is not None
+                and len(indicator_results_structured["adx"]["minus_di"]) > 0
             ):
-                latest_adx = adx_output.adx[-1]
-                latest_plus_di = adx_output.plus_di[-1]
-                latest_minus_di = adx_output.minus_di[-1]
+                latest_adx = indicator_results_structured["adx"]["adx"][-1]
+                latest_plus_di = indicator_results_structured["adx"]["plus_di"][-1]
+                latest_minus_di = indicator_results_structured["adx"]["minus_di"][-1]
 
                 report_sections.append(
-                    f"- ADX({adx_output.period}): {latest_adx:.2f}, +DI: {latest_plus_di:.2f}, -DI: {latest_minus_di:.2f}"
+                    f"- ADX({indicator_results_structured['adx']['period']}): {latest_adx:.2f}, +DI: {latest_plus_di:.2f}, -DI: {latest_minus_di:.2f}"
                 )
 
                 if latest_adx > 25:
@@ -1122,16 +1165,21 @@ async def generate_comprehensive_market_report(
                     report_sections.append("  - Direction: Bearish (-DI > +DI)")
 
                 # Add trend analysis
-                if len(adx_output.adx) > 1:
+                if len(indicator_results_structured["adx"]["adx"]) > 1:
                     trend_strength = (
-                        "↗" if adx_output.adx[-1] > adx_output.adx[-2] else "↘"
+                        "↗"
+                        if indicator_results_structured["adx"]["adx"][-1]
+                        > indicator_results_structured["adx"]["adx"][-2]
+                        else "↘"
                     )
                     report_sections.append(
-                        f"  - Trend Strength: {trend_strength} ({len(adx_output.adx)} data points)"
+                        f"  - Trend Strength: {trend_strength} ({len(indicator_results_structured['adx']['adx'])} data points)"
                     )
 
-            elif adx_output.error:
-                report_sections.append(f"- ADX: Error - {adx_output.error}")
+            elif indicator_results_structured["adx"].get("error"):
+                report_sections.append(
+                    f"- ADX: Error - {indicator_results_structured['adx']['error']}"
+                )
 
         # --- On-Balance Volume (OBV) ---
         if "OBV" in indicators_to_run:
@@ -1141,26 +1189,36 @@ async def generate_comprehensive_market_report(
                 history_len=inputs.history_len,
                 data_points=inputs.obv_data_points or settings.DEFAULT_OBV_DATA_POINTS,
             )
-            obv_output = await calculate_obv(ctx, obv_input)
-            indicator_results_structured["obv"] = obv_output.model_dump()
+            obv_output = await calculate_obv.run({"ctx": ctx, "inputs": obv_input})
+            indicator_results_structured["obv"] = json.loads(
+                obv_output[0].model_dump()["text"]
+            )
 
-            if obv_output.obv is not None and len(obv_output.obv) > 0:
-                latest_obv = obv_output.obv[-1]
+            if (
+                indicator_results_structured["obv"]["obv"] is not None
+                and len(indicator_results_structured["obv"]["obv"]) > 0
+            ):
+                latest_obv = indicator_results_structured["obv"]["obv"][-1]
                 report_sections.append(
-                    f"- OBV (using {obv_output.data_points} points): {latest_obv:.2f}"
+                    f"- OBV (using {indicator_results_structured['obv']['data_points']} points): {latest_obv:.2f}"
                 )
 
                 # Add trend analysis for volume flow
-                if len(obv_output.obv) > 1:
+                if len(indicator_results_structured["obv"]["obv"]) > 1:
                     volume_trend = (
-                        "↗" if obv_output.obv[-1] > obv_output.obv[-2] else "↘"
+                        "↗"
+                        if indicator_results_structured["obv"]["obv"][-1]
+                        > indicator_results_structured["obv"]["obv"][-2]
+                        else "↘"
                     )
                     report_sections.append(
-                        f"  - Volume Flow: {volume_trend} ({len(obv_output.obv)} data points)"
+                        f"  - Volume Flow: {volume_trend} ({len(indicator_results_structured['obv']['obv'])} data points)"
                     )
 
-            elif obv_output.error:
-                report_sections.append(f"- OBV: Error - {obv_output.error}")
+            elif indicator_results_structured["obv"].get("error"):
+                report_sections.append(
+                    f"- OBV: Error - {indicator_results_structured['obv']['error']}"
+                )
 
         # --- Synthesize the report ---
         if not report_sections:
@@ -1208,9 +1266,11 @@ async def generate_comprehensive_market_report(
         )
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         await ctx.error(
             f"Unexpected error in generate_comprehensive_market_report for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"An unexpected server error occurred: {str(e)}"

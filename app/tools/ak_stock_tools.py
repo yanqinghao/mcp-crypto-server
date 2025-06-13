@@ -608,9 +608,7 @@ async def calculate_a_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
         return SmaOutput(**output_base, sma=valid_sma)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in A-stock SMA calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in A-stock SMA calculation for {inputs.symbol}: {e}")
         return SmaOutput(**output_base, error="A-stock SMA calculation error.")
 
 
@@ -652,9 +650,7 @@ async def calculate_a_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
         return RsiOutput(**output_base, rsi=valid_rsi)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in A-stock RSI calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in A-stock RSI calculation for {inputs.symbol}: {e}")
         return RsiOutput(**output_base, error="A-stock RSI calculation error.")
 
 
@@ -709,9 +705,7 @@ async def calculate_a_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
         )
 
     except Exception as e:
-        await ctx.error(
-            f"Error in A-stock MACD calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in A-stock MACD calculation for {inputs.symbol}: {e}")
         return MacdOutput(**output_base, error="A-stock MACD calculation error.")
 
 
@@ -772,7 +766,6 @@ async def calculate_a_stock_bbands(ctx: Context, inputs: BbandsInput) -> BbandsO
     except Exception as e:
         await ctx.error(
             f"Error in A-stock Bollinger Bands calculation for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return BbandsOutput(
             **output_base, error="A-stock Bollinger Bands calculation error."
@@ -833,9 +826,7 @@ async def calculate_a_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
         return AtrOutput(**output_base, atr=valid_atr)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in A-stock ATR calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in A-stock ATR calculation for {inputs.symbol}: {e}")
         return AtrOutput(**output_base, error="A-stock ATR calculation error.")
 
 
@@ -879,9 +870,7 @@ async def calculate_hk_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
         return SmaOutput(**output_base, sma=valid_sma)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in HK stock SMA calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in HK stock SMA calculation for {inputs.symbol}: {e}")
         return SmaOutput(**output_base, error="HK stock SMA calculation error.")
 
 
@@ -922,9 +911,7 @@ async def calculate_hk_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
         return RsiOutput(**output_base, rsi=valid_rsi)
 
     except Exception as e:
-        await ctx.error(
-            f"Error in HK stock RSI calculation for {inputs.symbol}: {e}", exc_info=True
-        )
+        await ctx.error(f"Error in HK stock RSI calculation for {inputs.symbol}: {e}")
         return RsiOutput(**output_base, error="HK stock RSI calculation error.")
 
 
@@ -1127,7 +1114,6 @@ async def generate_a_stock_comprehensive_report(
     except Exception as e:
         await ctx.error(
             f"Error in A-stock comprehensive report for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"A股综合分析报告生成错误: {str(e)}"
@@ -1235,7 +1221,6 @@ async def generate_hk_stock_comprehensive_report(
     except Exception as e:
         await ctx.error(
             f"Error in HK stock comprehensive report for {inputs.symbol}: {e}",
-            exc_info=True,
         )
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"港股综合分析报告生成错误: {str(e)}"
