@@ -19,7 +19,6 @@ class ExchangeManager:
     def __init__(self):
         self._exchanges = {}
         self._default_exchange = None
-        self.symbols = []
 
     def add_exchange(
         self, name: str, exchange_config: Dict[str, Any], is_default: bool = False

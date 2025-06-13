@@ -1,7 +1,5 @@
 import yfinance as yf
-import json
 import asyncio
-import requests
 import pandas as pd
 from typing import List, Optional, Dict, Any
 from fastmcp import Context
@@ -48,7 +46,26 @@ class YFinanceManager:
 
     def _create_ticker(self, symbol: str):
         """创建ticker对象"""
-        return yf.Ticker(symbol, session=self._session)
+        return yf.Ticker(symbol)
+
+    def _create_search(
+        self,
+        query: str,
+        max_results: int = 10,
+        news_count: int = 5,
+        include_research: bool = False,
+    ):
+        """创建搜索对象"""
+        return yf.Search(
+            query,
+            max_results=max_results,
+            news_count=news_count,
+            include_research=include_research,
+        )
+
+    def _create_lookup(self, query: str):
+        """创建lookup对象"""
+        return yf.Lookup(query)
 
 
 # 全局YFinance管理器
@@ -579,6 +596,232 @@ async def fetch_options_data(
     return None
 
 
+# 更新后的搜索功能，使用最新的yfinance Search API
+async def search_us_stock_by_name(
+    ctx: Context,
+    company_name: str,
+    max_results: int = 10,
+    include_news: bool = False,
+    news_count: int = 5,
+    include_research: bool = False,
+) -> Optional[Dict[str, Any]]:
+    """
+    根据公司名称搜索美股代码
+
+    Args:
+        ctx: FastMCP上下文
+        company_name: 公司名称或关键词
+        max_results: 最大搜索结果数量
+        include_news: 是否包含新闻
+        news_count: 新闻数量
+        include_research: 是否包含研究报告
+
+    Returns:
+        搜索结果字典，包含quotes、news等
+    """
+    if not yfinance_manager.is_initialized():
+        await ctx.error("YFinance not initialized")
+        return None
+
+    try:
+        await ctx.info(f"Searching for US stocks: {company_name}")
+
+        # 使用yfinance的Search API
+        search = yfinance_manager._create_search(
+            query=company_name,
+            max_results=max_results,
+            news_count=news_count if include_news else 0,
+            include_research=include_research,
+        )
+
+        result = {}
+
+        # 获取股票搜索结果
+        try:
+            quotes = await yfinance_manager._run_in_executor(lambda: search.quotes)
+            if quotes:
+                # 格式化搜索结果
+                formatted_quotes = []
+                for quote in quotes:
+                    formatted_quotes.append(
+                        {
+                            "symbol": quote.get("symbol", ""),
+                            "name": quote.get("longname", quote.get("shortname", "")),
+                            "type": quote.get("quoteType", ""),
+                            "exchange": quote.get("exchange", ""),
+                            "sector": quote.get("sector", ""),
+                            "industry": quote.get("industry", ""),
+                            "market_cap": quote.get("marketCap", 0),
+                            "currency": quote.get("currency", ""),
+                        }
+                    )
+                result["quotes"] = formatted_quotes
+            else:
+                result["quotes"] = []
+        except Exception as e:
+            await ctx.warning(f"Error fetching quotes: {e}")
+            result["quotes"] = []
+
+        # 获取新闻（如果请求）
+        if include_news:
+            try:
+                news = await yfinance_manager._run_in_executor(lambda: search.news)
+                result["news"] = news if news else []
+            except Exception as e:
+                await ctx.warning(f"Error fetching news: {e}")
+                result["news"] = []
+
+        # 获取研究报告（如果请求）
+        if include_research:
+            try:
+                research = await yfinance_manager._run_in_executor(
+                    lambda: search.research
+                )
+                result["research"] = research if research else []
+            except Exception as e:
+                await ctx.warning(f"Error fetching research: {e}")
+                result["research"] = []
+
+        await ctx.info(
+            f"Search completed. Found {len(result.get('quotes', []))} quotes"
+        )
+        return result
+
+    except Exception as e:
+        await ctx.error(f"Error searching US stock: {e}")
+        return None
+
+
+async def lookup_us_stock_symbol(
+    ctx: Context,
+    query: str,
+    security_type: str = "all",  # all, stock, etf, mutualfund, index, future, currency, cryptocurrency
+    count: int = 20,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    使用Lookup API查找特定类型的证券
+
+    Args:
+        ctx: FastMCP上下文
+        query: 查询关键词
+        security_type: 证券类型
+        count: 返回结果数量
+
+    Returns:
+        查找结果列表
+    """
+    if not yfinance_manager.is_initialized():
+        await ctx.error("YFinance not initialized")
+        return None
+
+    try:
+        await ctx.info(f"Looking up {security_type} for: {query}")
+
+        lookup = yfinance_manager._create_lookup(query)
+
+        result = []
+
+        if security_type == "all":
+            data = await yfinance_manager._run_in_executor(lookup.get_all, count=count)
+        elif security_type == "stock":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_stock, count=count
+            )
+        elif security_type == "etf":
+            data = await yfinance_manager._run_in_executor(lookup.get_etf, count=count)
+        elif security_type == "mutualfund":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_mutualfund, count=count
+            )
+        elif security_type == "index":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_index, count=count
+            )
+        elif security_type == "future":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_future, count=count
+            )
+        elif security_type == "currency":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_currency, count=count
+            )
+        elif security_type == "cryptocurrency":
+            data = await yfinance_manager._run_in_executor(
+                lookup.get_cryptocurrency, count=count
+            )
+        else:
+            await ctx.error(f"Unsupported security type: {security_type}")
+            return None
+
+        if data:
+            for item in data:
+                result.append(
+                    {
+                        "symbol": item.get("symbol", ""),
+                        "name": item.get(
+                            "name", item.get("longname", item.get("shortname", ""))
+                        ),
+                        "type": item.get("type", item.get("typeDisp", "")),
+                        "exchange": item.get("exchange", item.get("exchDisp", "")),
+                        "market": item.get("market", ""),
+                    }
+                )
+
+        await ctx.info(f"Lookup completed. Found {len(result)} results")
+        return result
+
+    except Exception as e:
+        await ctx.error(f"Error in lookup: {e}")
+        return None
+
+
+# 验证美股符号的改进版本
+async def validate_us_stock_symbol(
+    ctx: Context, symbol: str
+) -> Optional[Dict[str, Any]]:
+    """
+    验证并获取美股符号信息
+
+    Args:
+        ctx: FastMCP上下文
+        symbol: 股票代码
+
+    Returns:
+        股票信息字典或None
+    """
+    if not yfinance_manager.is_initialized():
+        await ctx.error("YFinance not initialized")
+        return None
+
+    try:
+        await ctx.info(f"Validating symbol: {symbol}")
+
+        ticker = yfinance_manager._create_ticker(symbol)
+
+        info = await yfinance_manager._run_in_executor(lambda: ticker.info)
+
+        if info and info.get("regularMarketPrice") is not None:
+            return {
+                "symbol": symbol,
+                "name": info.get("longName", ""),
+                "sector": info.get("sector", ""),
+                "industry": info.get("industry", ""),
+                "exchange": info.get("exchange", ""),
+                "currency": info.get("currency", ""),
+                "country": info.get("country", ""),
+                "valid": True,
+            }
+        else:
+            await ctx.warning(
+                f"Symbol {symbol} appears to be invalid or no market data available"
+            )
+            return {"symbol": symbol, "valid": False}
+
+    except Exception as e:
+        await ctx.error(f"Error validating symbol {symbol}: {e}")
+        return {"symbol": symbol, "valid": False, "error": str(e)}
+
+
 # 向后兼容的函数别名
 async def _fetch_and_prepare_us_stock_data(
     ctx: Context,
@@ -610,63 +853,143 @@ async def _fetch_and_prepare_us_stock_data(
     return [item[field_map[data_field]] for item in stock_data[-required_days:]]
 
 
-async def search_us_stock_by_name(
-    ctx: Context, company_name: str
-) -> Optional[List[Dict[str, str]]]:
-    """根据公司名称搜索美股代码"""
-    try:
-        # 使用Yahoo Finance搜索API
-        url = "http://d.yimg.com/autoc.finance.yahoo.com/autoc"
-        params = {"query": company_name, "region": "1", "lang": "en"}
+# 新增：获取股票分析师评级数据
+async def fetch_analyst_recommendations(
+    ctx: Context,
+    symbol: str,
+    max_retries: int = 3,
+) -> Optional[Dict[str, Any]]:
+    """
+    获取分析师推荐评级
 
-        response = await yfinance_manager._run_in_executor(
-            requests.get, url, params=params
-        )
+    Args:
+        ctx: FastMCP上下文
+        symbol: 股票代码
+        max_retries: 最大重试次数
 
-        if response.status_code != 200:
-            return None
-
-        # 解析JSONP响应
-        content = response.text
-        json_start = content.find("(") + 1
-        json_end = content.rfind(")")
-        json_data = json.loads(content[json_start:json_end])
-
-        results = []
-        for item in json_data.get("ResultSet", {}).get("Result", []):
-            if item.get("type") == "S":  # 只要股票类型
-                results.append(
-                    {
-                        "symbol": item.get("symbol", ""),
-                        "name": item.get("name", ""),
-                        "exchange": item.get("exchDisp", ""),
-                    }
-                )
-
-        return results
-
-    except Exception as e:
-        await ctx.error(f"Error searching US stock: {e}")
+    Returns:
+        分析师评级数据
+    """
+    if not yfinance_manager.is_initialized():
+        await ctx.error("YFinance not initialized")
         return None
 
+    for attempt in range(max_retries + 1):
+        try:
+            await ctx.info(f"Fetching analyst recommendations for {symbol}")
 
-# 或者使用yfinance的ticker信息验证
-async def validate_us_stock_symbol(
-    ctx: Context, symbol: str
-) -> Optional[Dict[str, str]]:
-    """验证并获取美股符号信息"""
-    try:
-        ticker = yfinance_manager._create_ticker(symbol)
-        info = await yfinance_manager._run_in_executor(lambda: ticker.info)
+            ticker = yfinance_manager._create_ticker(symbol)
 
-        if info:
-            return {
-                "symbol": symbol,
-                "name": info.get("longName", ""),
-                "sector": info.get("sector", ""),
-                "industry": info.get("industry", ""),
-            }
+            # 获取分析师推荐
+            recommendations = await yfinance_manager._run_in_executor(
+                lambda: ticker.recommendations
+            )
+
+            # 获取分析师价格目标
+            price_targets = await yfinance_manager._run_in_executor(
+                lambda: ticker.analyst_price_targets
+            )
+
+            result = {}
+
+            if recommendations is not None and not recommendations.empty:
+                result["recommendations"] = recommendations.to_dict("records")
+            else:
+                result["recommendations"] = []
+
+            if price_targets is not None:
+                result["price_targets"] = price_targets
+            else:
+                result["price_targets"] = {}
+
+            await ctx.info(f"Successfully fetched analyst data for {symbol}")
+            return result
+
+        except Exception as e:
+            await ctx.warning(
+                f"Error fetching analyst recommendations for {symbol} (attempt {attempt + 1}): {e}"
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(1.0)
+            else:
+                await ctx.error(f"Max retries exceeded for {symbol} analyst data")
+                return None
+
+    return None
+
+
+# 新增：获取股票分红历史
+async def fetch_dividend_history(
+    ctx: Context,
+    symbol: str,
+    period: str = "5y",
+    max_retries: int = 3,
+) -> Optional[List[Dict[str, Any]]]:
+    """
+    获取股票分红历史
+
+    Args:
+        ctx: FastMCP上下文
+        symbol: 股票代码
+        period: 数据周期
+        max_retries: 最大重试次数
+
+    Returns:
+        分红历史数据列表
+    """
+    if not yfinance_manager.is_initialized():
+        await ctx.error("YFinance not initialized")
         return None
-    except Exception as e:
-        await ctx.error(f"Error validating symbol {symbol}: {e}")
-        return None
+
+    for attempt in range(max_retries + 1):
+        try:
+            await ctx.info(f"Fetching dividend history for {symbol}")
+
+            ticker = yfinance_manager._create_ticker(symbol)
+
+            # 获取股票行为数据（包含分红和股票分割）
+            actions = await yfinance_manager._run_in_executor(
+                ticker.history, period=period, actions=True
+            )
+
+            if actions is None or actions.empty:
+                await ctx.warning(f"No dividend data for {symbol}")
+                return []
+
+            # 提取分红数据
+            dividend_data = []
+            actions = actions.reset_index()
+
+            for _, row in actions.iterrows():
+                dividend = row.get("Dividends", 0)
+                if dividend > 0:
+                    date_val = row.get("Date", row.get("Datetime", ""))
+                    if hasattr(date_val, "strftime"):
+                        date_str = date_val.strftime("%Y-%m-%d")
+                    else:
+                        date_str = str(date_val)
+
+                    dividend_data.append(
+                        {
+                            "date": date_str,
+                            "dividend": float(dividend),
+                            "type": "dividend",
+                        }
+                    )
+
+            await ctx.info(
+                f"Successfully fetched {len(dividend_data)} dividend records for {symbol}"
+            )
+            return dividend_data
+
+        except Exception as e:
+            await ctx.warning(
+                f"Error fetching dividend history for {symbol} (attempt {attempt + 1}): {e}"
+            )
+            if attempt < max_retries:
+                await asyncio.sleep(1.0)
+            else:
+                await ctx.error(f"Max retries exceeded for {symbol} dividend data")
+                return None
+
+    return None

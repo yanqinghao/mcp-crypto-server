@@ -1,5 +1,6 @@
 import numpy as np
 import talib
+import json
 from typing import Dict, Optional, List, Any
 from datetime import datetime
 
@@ -29,13 +30,13 @@ from models.market_data import (
 )
 from fastmcp import FastMCP, Context
 
-# 导入现有的yfinance服务函数
+# 导入更新的yfinance服务函数
 from services.yfinance_service import (
     fetch_us_stock_hist_data,
-    fetch_us_stock_info,
     fetch_us_stock_financials,
-    fetch_options_data,
     search_us_stock_by_name,
+    fetch_dividend_history,
+    fetch_market_indices_data,
 )
 
 mcp = FastMCP()
@@ -337,37 +338,37 @@ async def get_us_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
         )
 
 
-@mcp.tool()
-async def get_us_stock_info(ctx: Context, symbol: str) -> dict:
-    """
-    获取美股详细信息
+# @mcp.tool()
+# async def get_us_stock_info(ctx: Context, symbol: str) -> dict:
+#     """
+#     获取美股详细信息
 
-    Args:
-        symbol: 股票代码 (如: AAPL)
-    """
-    await ctx.info(f"Fetching US stock info for {symbol}")
+#     Args:
+#         symbol: 股票代码 (如: AAPL)
+#     """
+#     await ctx.info(f"Fetching US stock info for {symbol}")
 
-    try:
-        stock_info = await fetch_us_stock_info(ctx, symbol)
+#     try:
+#         stock_info = await fetch_us_stock_info(ctx, symbol)
 
-        if stock_info:
-            return {"success": True, "symbol": symbol, "info": stock_info}
-        else:
-            return {
-                "success": False,
-                "symbol": symbol,
-                "error": "US stock info not available",
-            }
+#         if stock_info:
+#             return {"success": True, "symbol": symbol, "info": stock_info}
+#         else:
+#             return {
+#                 "success": False,
+#                 "symbol": symbol,
+#                 "error": "US stock info not available",
+#             }
 
-    except Exception as e:
-        await ctx.error(f"Error fetching US stock info: {e}")
-        return {"success": False, "symbol": symbol, "error": str(e)}
+#     except Exception as e:
+#         await ctx.error(f"Error fetching US stock info: {e}")
+#         return {"success": False, "symbol": symbol, "error": str(e)}
 
 
 @mcp.tool()
 async def search_us_stock_symbols(ctx: Context, query: str, limit: int = 10) -> dict:
     """
-    搜索美股股票代码
+    搜索美股股票代码（使用更新的API）
 
     Args:
         query: 搜索关键词 (如: apple, AAPL, microsoft)
@@ -376,17 +377,19 @@ async def search_us_stock_symbols(ctx: Context, query: str, limit: int = 10) -> 
     await ctx.info(f"Searching US stock symbols for '{query}'")
 
     try:
-        results = await search_us_stock_by_name(ctx, query)
+        # 使用更新的搜索API
+        results = await search_us_stock_by_name(
+            ctx, query, max_results=limit, include_news=False
+        )
 
-        if results:
-            # 限制结果数量
-            limited_results = results[:limit]
+        if results and results.get("quotes"):
+            quotes = results["quotes"]
             return {
                 "success": True,
                 "query": query,
                 "market_type": "us_stock",
-                "results": limited_results,
-                "count": len(limited_results),
+                "results": quotes,
+                "count": len(quotes),
             }
         else:
             return {
@@ -404,6 +407,71 @@ async def search_us_stock_symbols(ctx: Context, query: str, limit: int = 10) -> 
             "market_type": "us_stock",
             "error": str(e),
         }
+
+
+# @mcp.tool()
+# async def lookup_us_securities(
+#     ctx: Context,
+#     query: str,
+#     security_type: str = "stock",
+#     count: int = 20
+# ) -> dict:
+#     """
+#     按类型查找美股证券（新增工具）
+
+#     Args:
+#         query: 查询关键词
+#         security_type: 证券类型 (stock, etf, mutualfund, index, etc.)
+#         count: 返回结果数量
+#     """
+#     await ctx.info(f"Looking up {security_type} securities for '{query}'")
+
+#     try:
+#         results = await lookup_us_stock_symbol(ctx, query, security_type, count)
+
+#         if results:
+#             return {
+#                 "success": True,
+#                 "query": query,
+#                 "security_type": security_type,
+#                 "results": results,
+#                 "count": len(results),
+#             }
+#         else:
+#             return {
+#                 "success": False,
+#                 "query": query,
+#                 "security_type": security_type,
+#                 "error": f"No {security_type} securities found",
+#             }
+
+#     except Exception as e:
+#         await ctx.error(f"Error looking up {security_type} securities: {e}")
+#         return {
+#             "success": False,
+#             "query": query,
+#             "security_type": security_type,
+#             "error": str(e),
+#         }
+
+
+# @mcp.tool()
+# async def validate_us_stock_symbol_tool(ctx: Context, symbol: str) -> dict:
+#     """
+#     验证美股代码是否有效（新增工具）
+
+#     Args:
+#         symbol: 股票代码
+#     """
+#     await ctx.info(f"Validating US stock symbol: {symbol}")
+
+#     try:
+#         result = await validate_us_stock_symbol(ctx, symbol)
+#         return result if result else {"symbol": symbol, "valid": False}
+
+#     except Exception as e:
+#         await ctx.error(f"Error validating symbol {symbol}: {e}")
+#         return {"symbol": symbol, "valid": False, "error": str(e)}
 
 
 @mcp.tool()
@@ -502,37 +570,585 @@ async def get_us_stock_financials(
         return {"success": False, "symbol": symbol, "error": str(e)}
 
 
+# @mcp.tool()
+# async def get_us_stock_options(
+#     ctx: Context, symbol: str, expiration_date: Optional[str] = None
+# ) -> dict:
+#     """
+#     获取美股期权数据
+
+#     Args:
+#         symbol: 股票代码
+#         expiration_date: 到期日期 (可选)
+#     """
+#     await ctx.info(f"Fetching US stock options for {symbol}")
+
+#     try:
+#         options = await fetch_options_data(ctx, symbol, expiration_date)
+
+#         if options:
+#             return {"success": True, "symbol": symbol, "options": options}
+#         else:
+#             return {
+#                 "success": False,
+#                 "symbol": symbol,
+#                 "error": "No options data available",
+#             }
+
+#     except Exception as e:
+#         await ctx.error(f"Error fetching US stock options: {e}")
+#         return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+# ==================== 新增：市场数据工具 ====================
+
+
 @mcp.tool()
-async def get_us_stock_options(
-    ctx: Context, symbol: str, expiration_date: Optional[str] = None
+async def get_market_indices(
+    ctx: Context,
+    indices: Optional[List[str]] = None,
+    period: str = "1mo",
+    interval: str = "1d",
 ) -> dict:
     """
-    获取美股期权数据
+    获取美股市场指数数据（新增工具）
+
+    Args:
+        indices: 指数代码列表 (默认: S&P500, Dow Jones, NASDAQ)
+        period: 数据周期
+        interval: 数据间隔
+    """
+    if indices is None:
+        indices = ["^GSPC", "^DJI", "^IXIC"]  # S&P500, Dow Jones, NASDAQ
+
+    await ctx.info(f"Fetching market indices data for {indices}")
+
+    try:
+        results = await fetch_market_indices_data(ctx, indices, period, interval)
+
+        if results:
+            return {
+                "success": True,
+                "indices": list(results.keys()),
+                "period": period,
+                "interval": interval,
+                "data": results,
+                "count": len(results),
+            }
+        else:
+            return {
+                "success": False,
+                "error": "No market indices data available",
+            }
+
+    except Exception as e:
+        await ctx.error(f"Error fetching market indices: {e}")
+        return {"success": False, "error": str(e)}
+
+
+# @mcp.tool()
+# async def get_realtime_stock_data(
+#     ctx: Context, symbols: List[str]
+# ) -> dict:
+#     """
+#     获取多只股票的实时数据（新增工具）
+
+#     Args:
+#         symbols: 股票代码列表
+#     """
+#     await ctx.info(f"Fetching real-time data for {len(symbols)} stocks")
+
+#     try:
+#         results = await fetch_us_stock_realtime_data(ctx, symbols)
+
+#         if results:
+#             return {
+#                 "success": True,
+#                 "symbols": list(results.keys()),
+#                 "data": results,
+#                 "count": len(results),
+#                 "timestamp": datetime.now().isoformat(),
+#             }
+#         else:
+#             return {
+#                 "success": False,
+#                 "error": "No real-time data available",
+#             }
+
+#     except Exception as e:
+#         await ctx.error(f"Error fetching real-time data: {e}")
+#         return {"success": False, "error": str(e)}
+
+
+# @mcp.tool()
+# async def get_analyst_recommendations(ctx: Context, symbol: str) -> dict:
+#     """
+#     获取分析师评级和推荐（新增工具）
+
+#     Args:
+#         symbol: 股票代码
+#     """
+#     await ctx.info(f"Fetching analyst recommendations for {symbol}")
+
+#     try:
+#         results = await fetch_analyst_recommendations(ctx, symbol)
+
+#         if results:
+#             return {
+#                 "success": True,
+#                 "symbol": symbol,
+#                 "recommendations": results.get("recommendations", []),
+#                 "price_targets": results.get("price_targets", {}),
+#             }
+#         else:
+#             return {
+#                 "success": False,
+#                 "symbol": symbol,
+#                 "error": "No analyst recommendations available",
+#             }
+
+#     except Exception as e:
+#         await ctx.error(f"Error fetching analyst recommendations: {e}")
+#         return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+@mcp.tool()
+async def get_dividend_history(ctx: Context, symbol: str, period: str = "5y") -> dict:
+    """
+    获取股票分红历史（新增工具）
 
     Args:
         symbol: 股票代码
-        expiration_date: 到期日期 (可选)
+        period: 数据周期
     """
-    await ctx.info(f"Fetching US stock options for {symbol}")
+    await ctx.info(f"Fetching dividend history for {symbol}")
 
     try:
-        options = await fetch_options_data(ctx, symbol, expiration_date)
+        results = await fetch_dividend_history(ctx, symbol, period)
 
-        if options:
-            return {"success": True, "symbol": symbol, "options": options}
+        if results:
+            return {
+                "success": True,
+                "symbol": symbol,
+                "period": period,
+                "dividends": results,
+                "count": len(results),
+            }
         else:
             return {
                 "success": False,
                 "symbol": symbol,
-                "error": "No options data available",
+                "error": "No dividend history available",
             }
 
     except Exception as e:
-        await ctx.error(f"Error fetching US stock options: {e}")
+        await ctx.error(f"Error fetching dividend history: {e}")
         return {"success": False, "symbol": symbol, "error": str(e)}
 
 
-# ==================== 美股技术分析工具 ====================
+# ==================== 新增：更多技术指标工具 ====================
+
+
+@mcp.tool()
+async def calculate_us_stock_ema(
+    ctx: Context,
+    symbol: str,
+    period: int = 20,
+    timeframe: str = "1d",
+    history_len: int = 50,
+) -> dict:
+    """
+    计算美股指数移动平均线 (EMA)
+
+    Args:
+        symbol: 股票代码
+        period: EMA周期
+        timeframe: 时间框架
+        history_len: 历史数据长度
+    """
+    await ctx.info(f"Calculating EMA for {symbol}, period: {period}")
+
+    try:
+        required_candles = period + history_len
+        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval = interval_map.get(timeframe, "1d")
+        data_period = "2y" if required_candles > 252 else "1y"
+
+        close_prices = await _fetch_single_series_data(
+            ctx, symbol, data_period, interval, required_candles, "close"
+        )
+
+        if close_prices is None or len(close_prices) < required_candles:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Insufficient data for EMA calculation",
+            }
+
+        ema_values = talib.EMA(close_prices, timeperiod=period)
+        valid_ema = _extract_valid_values(ema_values, history_len)
+
+        if not valid_ema:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "EMA calculation resulted in no valid data",
+            }
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "indicator": "EMA",
+            "period": period,
+            "timeframe": timeframe,
+            "values": valid_ema,
+            "latest": valid_ema[-1],
+            "count": len(valid_ema),
+        }
+
+    except Exception as e:
+        await ctx.error(f"Error calculating EMA for {symbol}: {e}")
+        return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+@mcp.tool()
+async def calculate_us_stock_stochastic(
+    ctx: Context,
+    symbol: str,
+    k_period: int = 14,
+    d_period: int = 3,
+    timeframe: str = "1d",
+    history_len: int = 50,
+) -> dict:
+    """
+    计算美股随机指标 (Stochastic Oscillator)
+
+    Args:
+        symbol: 股票代码
+        k_period: %K周期
+        d_period: %D周期
+        timeframe: 时间框架
+        history_len: 历史数据长度
+    """
+    await ctx.info(f"Calculating Stochastic for {symbol}")
+
+    try:
+        required_candles = k_period + d_period + history_len
+        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval = interval_map.get(timeframe, "1d")
+        data_period = "2y" if required_candles > 252 else "1y"
+
+        price_data = await _fetch_multi_series_data(
+            ctx,
+            symbol,
+            data_period,
+            interval,
+            required_candles,
+            ["high", "low", "close"],
+        )
+
+        if not price_data:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Failed to fetch HLC data for Stochastic",
+            }
+
+        slowk, slowd = talib.STOCH(
+            price_data["high"],
+            price_data["low"],
+            price_data["close"],
+            fastk_period=k_period,
+            slowk_period=d_period,
+            slowk_matype=0,
+            slowd_period=d_period,
+            slowd_matype=0,
+        )
+
+        valid_k = _extract_valid_values(slowk, history_len)
+        valid_d = _extract_valid_values(slowd, history_len)
+
+        if not valid_k or not valid_d:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Stochastic calculation resulted in no valid data",
+            }
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "indicator": "Stochastic",
+            "k_period": k_period,
+            "d_period": d_period,
+            "timeframe": timeframe,
+            "k_values": valid_k,
+            "d_values": valid_d,
+            "latest_k": valid_k[-1],
+            "latest_d": valid_d[-1],
+            "count": len(valid_k),
+        }
+
+    except Exception as e:
+        await ctx.error(f"Error calculating Stochastic for {symbol}: {e}")
+        return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+@mcp.tool()
+async def calculate_us_stock_williams_r(
+    ctx: Context,
+    symbol: str,
+    period: int = 14,
+    timeframe: str = "1d",
+    history_len: int = 50,
+) -> dict:
+    """
+    计算美股威廉指标 (Williams %R)
+
+    Args:
+        symbol: 股票代码
+        period: 计算周期
+        timeframe: 时间框架
+        history_len: 历史数据长度
+    """
+    await ctx.info(f"Calculating Williams %R for {symbol}")
+
+    try:
+        required_candles = period + history_len
+        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval = interval_map.get(timeframe, "1d")
+        data_period = "2y" if required_candles > 252 else "1y"
+
+        price_data = await _fetch_multi_series_data(
+            ctx,
+            symbol,
+            data_period,
+            interval,
+            required_candles,
+            ["high", "low", "close"],
+        )
+
+        if not price_data:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Failed to fetch HLC data for Williams %R",
+            }
+
+        willr = talib.WILLR(
+            price_data["high"],
+            price_data["low"],
+            price_data["close"],
+            timeperiod=period,
+        )
+
+        valid_willr = _extract_valid_values(willr, history_len)
+
+        if not valid_willr:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Williams %R calculation resulted in no valid data",
+            }
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "indicator": "Williams %R",
+            "period": period,
+            "timeframe": timeframe,
+            "values": valid_willr,
+            "latest": valid_willr[-1],
+            "count": len(valid_willr),
+        }
+
+    except Exception as e:
+        await ctx.error(f"Error calculating Williams %R for {symbol}: {e}")
+        return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+@mcp.tool()
+async def calculate_us_stock_volume_indicators(
+    ctx: Context,
+    symbol: str,
+    timeframe: str = "1d",
+    history_len: int = 50,
+) -> dict:
+    """
+    计算美股成交量指标 (OBV, Volume SMA)
+
+    Args:
+        symbol: 股票代码
+        timeframe: 时间框架
+        history_len: 历史数据长度
+    """
+    await ctx.info(f"Calculating volume indicators for {symbol}")
+
+    try:
+        required_candles = history_len + 20
+        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval = interval_map.get(timeframe, "1d")
+        data_period = "2y" if required_candles > 252 else "1y"
+
+        price_data = await _fetch_multi_series_data(
+            ctx, symbol, data_period, interval, required_candles, ["close", "volume"]
+        )
+
+        if not price_data:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Failed to fetch price and volume data",
+            }
+        import numpy as np
+
+        # 计算OBV (On Balance Volume)
+        obv = talib.OBV(
+            np.array([float(i) for i in price_data["close"]]),
+            np.array([float(i) for i in price_data["volume"]]),
+        )
+        valid_obv = _extract_valid_values(obv, history_len)
+
+        # 计算成交量移动平均
+        volume_sma = talib.SMA(
+            np.array([float(i) for i in price_data["volume"]]), timeperiod=20
+        )
+        valid_volume_sma = _extract_valid_values(volume_sma, history_len)
+
+        if not valid_obv or not valid_volume_sma:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Volume indicators calculation resulted in no valid data",
+            }
+
+        # 计算当前成交量相对于平均成交量的比例
+        current_volume = price_data["volume"][-1]
+        avg_volume = valid_volume_sma[-1]
+        volume_ratio = current_volume / avg_volume if avg_volume > 0 else 0
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "timeframe": timeframe,
+            "obv": valid_obv,
+            "volume_sma": valid_volume_sma,
+            "latest_obv": valid_obv[-1],
+            "latest_volume_sma": valid_volume_sma[-1],
+            "current_volume": current_volume,
+            "volume_ratio": volume_ratio,
+            "count": len(valid_obv),
+        }
+
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        await ctx.error(f"Error calculating volume indicators for {symbol}: {e}")
+        return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+# ==================== 风险管理工具 ====================
+
+
+@mcp.tool()
+async def calculate_risk_metrics(
+    ctx: Context,
+    symbol: str,
+    period: str = "1y",
+    timeframe: str = "1d",
+    benchmark_symbol: str = "^GSPC",
+) -> dict:
+    """
+    计算风险指标 (Beta, Volatility, Sharpe Ratio等)
+
+    Args:
+        symbol: 股票代码
+        period: 计算周期
+        timeframe: 时间框架
+        benchmark_symbol: 基准指数
+    """
+    await ctx.info(f"Calculating risk metrics for {symbol}")
+
+    try:
+        # 获取股票数据
+        stock_data = await fetch_us_stock_hist_data(ctx, symbol, period, timeframe)
+        if not stock_data or len(stock_data) < 50:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Insufficient stock data for risk calculation",
+            }
+
+        # 获取基准数据
+        benchmark_data = await fetch_us_stock_hist_data(
+            ctx, benchmark_symbol, period, timeframe
+        )
+        if not benchmark_data or len(benchmark_data) < 50:
+            return {
+                "success": False,
+                "symbol": symbol,
+                "error": "Insufficient benchmark data for risk calculation",
+            }
+
+        # 计算收益率
+        stock_prices = np.array([item["close"] for item in stock_data])
+        benchmark_prices = np.array([item["close"] for item in benchmark_data])
+
+        # 对齐数据长度
+        min_length = min(len(stock_prices), len(benchmark_prices))
+        stock_prices = stock_prices[-min_length:]
+        benchmark_prices = benchmark_prices[-min_length:]
+
+        # 计算日收益率
+        stock_returns = np.diff(stock_prices) / stock_prices[:-1]
+        benchmark_returns = np.diff(benchmark_prices) / benchmark_prices[:-1]
+
+        # 计算风险指标
+        volatility = np.std(stock_returns) * np.sqrt(252)  # 年化波动率
+        # benchmark_volatility = np.std(benchmark_returns) * np.sqrt(252)
+
+        # Beta计算
+        covariance = np.cov(stock_returns, benchmark_returns)[0, 1]
+        benchmark_variance = np.var(benchmark_returns)
+        beta = covariance / benchmark_variance if benchmark_variance > 0 else 0
+
+        # 年化收益率
+        annual_return = (stock_prices[-1] / stock_prices[0]) - 1
+        benchmark_annual_return = (benchmark_prices[-1] / benchmark_prices[0]) - 1
+
+        # Sharpe比率 (假设无风险利率为2%)
+        risk_free_rate = 0.02
+        sharpe_ratio = (
+            (annual_return - risk_free_rate) / volatility if volatility > 0 else 0
+        )
+
+        # 最大回撤
+        rolling_max = np.maximum.accumulate(stock_prices)
+        drawdown = (stock_prices - rolling_max) / rolling_max
+        max_drawdown = np.min(drawdown)
+
+        return {
+            "success": True,
+            "symbol": symbol,
+            "benchmark": benchmark_symbol,
+            "period": period,
+            "volatility": volatility,
+            "beta": beta,
+            "annual_return": annual_return,
+            "benchmark_return": benchmark_annual_return,
+            "sharpe_ratio": sharpe_ratio,
+            "max_drawdown": max_drawdown,
+            "data_points": len(stock_returns),
+        }
+
+    except Exception as e:
+        await ctx.error(f"Error calculating risk metrics for {symbol}: {e}")
+        return {"success": False, "symbol": symbol, "error": str(e)}
+
+
+# ==================== 原有技术分析工具 ====================
+# (保持原有的SMA, RSI, MACD, BBANDS, ATR函数不变)
 
 
 @mcp.tool()
@@ -873,21 +1489,35 @@ async def generate_us_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=sma_period,
             )
-            sma_output = await calculate_us_stock_sma(ctx, sma_input)
-            indicator_results_structured["sma"] = sma_output.model_dump()
+            sma_output = await calculate_us_stock_sma.run(
+                {"ctx": ctx, "inputs": sma_input}
+            )
+            indicator_results_structured["sma"] = json.loads(
+                sma_output[0].model_dump()["text"]
+            )
 
-            if sma_output.sma is not None and len(sma_output.sma) > 0:
-                latest_sma = sma_output.sma[-1]
+            if (
+                indicator_results_structured["sma"]["sma"] is not None
+                and len(indicator_results_structured["sma"]["sma"]) > 0
+            ):
+                latest_sma = indicator_results_structured["sma"]["sma"][-1]
                 report_sections.append(
-                    f"- US Stock SMA({sma_output.period}): ${latest_sma:.2f} (Latest)"
+                    f"- US Stock SMA({indicator_results_structured['sma']['period']}): ${latest_sma:.2f} (Latest)"
                 )
-                if len(sma_output.sma) > 1:
-                    trend = "↗" if sma_output.sma[-1] > sma_output.sma[-2] else "↘"
-                    report_sections.append(
-                        f"  - Trend: {trend} ({len(sma_output.sma)} data points)"
+                if len(indicator_results_structured["sma"]["sma"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["sma"]["sma"][-1]
+                        > indicator_results_structured["sma"]["sma"][-2]
+                        else "↘"
                     )
-            elif sma_output.error:
-                report_sections.append(f"- US Stock SMA: Error - {sma_output.error}")
+                    report_sections.append(
+                        f"  - Trend: {trend} ({len(indicator_results_structured['sma']['sma'])} data points)"
+                    )
+            elif indicator_results_structured["sma"]["error"]:
+                report_sections.append(
+                    f"- US Stock SMA: Error - {indicator_results_structured['sma']['error']}"
+                )
 
         # RSI分析
         if "RSI" in indicators_to_run:
@@ -898,13 +1528,20 @@ async def generate_us_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=rsi_period,
             )
-            rsi_output = await calculate_us_stock_rsi(ctx, rsi_input)
-            indicator_results_structured["rsi"] = rsi_output.model_dump()
+            rsi_output = await calculate_us_stock_rsi.run(
+                {"ctx": ctx, "inputs": rsi_input}
+            )
+            indicator_results_structured["rsi"] = json.loads(
+                rsi_output[0].model_dump()["text"]
+            )
 
-            if rsi_output.rsi is not None and len(rsi_output.rsi) > 0:
-                latest_rsi = rsi_output.rsi[-1]
+            if (
+                indicator_results_structured["rsi"]["rsi"] is not None
+                and len(indicator_results_structured["rsi"]["rsi"]) > 0
+            ):
+                latest_rsi = indicator_results_structured["rsi"]["rsi"][-1]
                 report_sections.append(
-                    f"- US Stock RSI({rsi_output.period}): {latest_rsi:.2f}"
+                    f"- US Stock RSI({indicator_results_structured['rsi']['period']}): {latest_rsi:.2f}"
                 )
                 if latest_rsi > 70:
                     report_sections.append(
@@ -915,13 +1552,20 @@ async def generate_us_stock_comprehensive_report(
                         "  - Note: RSI suggests oversold conditions (<30)"
                     )
 
-                if len(rsi_output.rsi) > 1:
-                    trend = "↗" if rsi_output.rsi[-1] > rsi_output.rsi[-2] else "↘"
-                    report_sections.append(
-                        f"  - Trend: {trend} ({len(rsi_output.rsi)} data points)"
+                if len(indicator_results_structured["rsi"]["rsi"]) > 1:
+                    trend = (
+                        "↗"
+                        if indicator_results_structured["rsi"]["rsi"][-1]
+                        > indicator_results_structured["rsi"]["rsi"][-2]
+                        else "↘"
                     )
-            elif rsi_output.error:
-                report_sections.append(f"- US Stock RSI: Error - {rsi_output.error}")
+                    report_sections.append(
+                        f"  - Trend: {trend} ({len(indicator_results_structured['rsi']['rsi'])} data points)"
+                    )
+            elif indicator_results_structured["rsi"]["error"]:
+                report_sections.append(
+                    f"- US Stock RSI: Error - {indicator_results_structured['rsi']['error']}"
+                )
 
         # MACD分析
         if "MACD" in indicators_to_run:
@@ -933,23 +1577,27 @@ async def generate_us_stock_comprehensive_report(
                 slow_period=inputs.macd_slow_period or settings.DEFAULT_MACD_SLOW,
                 signal_period=inputs.macd_signal_period or settings.DEFAULT_MACD_SIGNAL,
             )
-            macd_output = await calculate_us_stock_macd(ctx, macd_input)
-            indicator_results_structured["macd"] = macd_output.model_dump()
+            macd_output = await calculate_us_stock_macd.run(
+                {"ctx": ctx, "inputs": macd_input}
+            )
+            indicator_results_structured["macd"] = json.loads(
+                macd_output[0].model_dump()["text"]
+            )
 
             if (
-                macd_output.macd is not None
-                and len(macd_output.macd) > 0
-                and macd_output.signal is not None
-                and len(macd_output.signal) > 0
-                and macd_output.histogram is not None
-                and len(macd_output.histogram) > 0
+                indicator_results_structured["macd"]["macd"] is not None
+                and len(indicator_results_structured["macd"]["macd"]) > 0
+                and indicator_results_structured["macd"]["signal"] is not None
+                and len(indicator_results_structured["macd"]["signal"]) > 0
+                and indicator_results_structured["macd"]["histogram"] is not None
+                and len(indicator_results_structured["macd"]["histogram"]) > 0
             ):
-                latest_macd = macd_output.macd[-1]
-                latest_signal = macd_output.signal[-1]
-                latest_hist = macd_output.histogram[-1]
+                latest_macd = indicator_results_structured["macd"]["macd"][-1]
+                latest_signal = indicator_results_structured["macd"]["signal"][-1]
+                latest_hist = indicator_results_structured["macd"]["histogram"][-1]
 
                 report_sections.append(
-                    f"- US Stock MACD({macd_output.fast_period},{macd_output.slow_period},{macd_output.signal_period}): "
+                    f"- US Stock MACD({indicator_results_structured['macd']['fast_period']},{indicator_results_structured['macd']['slow_period']},{indicator_results_structured['macd']['signal']}): "
                     f"MACD: {latest_macd:.4f}, Signal: {latest_signal:.4f}, Histogram: {latest_hist:.4f}"
                 )
 
@@ -962,8 +1610,10 @@ async def generate_us_stock_comprehensive_report(
                         "  - Note: MACD histogram negative, potentially bearish momentum"
                     )
 
-            elif macd_output.error:
-                report_sections.append(f"- US Stock MACD: Error - {macd_output.error}")
+            elif indicator_results_structured["macd"]["error"]:
+                report_sections.append(
+                    f"- US Stock MACD: Error - {indicator_results_structured['macd']['error']}"
+                )
 
         # Bollinger Bands分析
         if "BBANDS" in indicators_to_run:
@@ -973,32 +1623,38 @@ async def generate_us_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=inputs.bbands_period or settings.DEFAULT_BBANDS_PERIOD,
             )
-            bbands_output = await calculate_us_stock_bbands(ctx, bbands_input)
-            indicator_results_structured["bbands"] = bbands_output.model_dump()
+            bbands_output = await calculate_us_stock_bbands.run(
+                {"ctx": ctx, "inputs": bbands_input}
+            )
+            indicator_results_structured["bbands"] = json.loads(
+                bbands_output[0].model_dump()["text"]
+            )
 
             if (
-                bbands_output.upper_band is not None
-                and len(bbands_output.upper_band) > 0
-                and bbands_output.middle_band is not None
-                and len(bbands_output.middle_band) > 0
-                and bbands_output.lower_band is not None
-                and len(bbands_output.lower_band) > 0
+                indicator_results_structured["bbands"]["upper_band"] is not None
+                and len(indicator_results_structured["bbands"]["upper_band"]) > 0
+                and indicator_results_structured["bbands"]["middle_band"] is not None
+                and len(indicator_results_structured["bbands"]["middle_band"]) > 0
+                and indicator_results_structured["bbands"]["lower_band"] is not None
+                and len(indicator_results_structured["bbands"]["lower_band"]) > 0
             ):
-                latest_upper = bbands_output.upper_band[-1]
-                latest_middle = bbands_output.middle_band[-1]
-                latest_lower = bbands_output.lower_band[-1]
+                latest_upper = indicator_results_structured["bbands"]["upper_band"][-1]
+                latest_middle = indicator_results_structured["bbands"]["middle_band"][
+                    -1
+                ]
+                latest_lower = indicator_results_structured["bbands"]["lower_band"][-1]
 
                 report_sections.append(
-                    f"- US Stock Bollinger Bands({bbands_output.period}): "
+                    f"- US Stock Bollinger Bands({indicator_results_structured['bbands']['period']}): "
                     f"Upper: ${latest_upper:.2f}, Middle: ${latest_middle:.2f}, Lower: ${latest_lower:.2f}"
                 )
                 report_sections.append(
                     f"  - Band Width: ${latest_upper - latest_lower:.2f}"
                 )
 
-            elif bbands_output.error:
+            elif indicator_results_structured["bbands"]["error"]:
                 report_sections.append(
-                    f"- US Stock Bollinger Bands: Error - {bbands_output.error}"
+                    f"- US Stock Bollinger Bands: Error - {indicator_results_structured['bbands']['error']}"
                 )
 
         # ATR分析
@@ -1009,23 +1665,37 @@ async def generate_us_stock_comprehensive_report(
                 history_len=inputs.history_len,
                 period=inputs.atr_period or settings.DEFAULT_ATR_PERIOD,
             )
-            atr_output = await calculate_us_stock_atr(ctx, atr_input)
-            indicator_results_structured["atr"] = atr_output.model_dump()
+            atr_output = await calculate_us_stock_atr.run(
+                {"ctx": ctx, "inputs": atr_input}
+            )
+            indicator_results_structured["atr"] = json.loads(
+                atr_output[0].model_dump()["text"]
+            )
 
-            if atr_output.atr is not None and len(atr_output.atr) > 0:
-                latest_atr = atr_output.atr[-1]
+            if (
+                indicator_results_structured["atr"]["atr"] is not None
+                and len(indicator_results_structured["atr"]["atr"]) > 0
+            ):
+                latest_atr = indicator_results_structured["atr"]["atr"][-1]
                 report_sections.append(
-                    f"- US Stock ATR({atr_output.period}): ${latest_atr:.2f} (Volatility Measure)"
+                    f"- US Stock ATR({indicator_results_structured['atr']['period']}): ${latest_atr:.2f} (Volatility Measure)"
                 )
 
-                if len(atr_output.atr) > 1:
-                    vol_trend = "↗" if atr_output.atr[-1] > atr_output.atr[-2] else "↘"
+                if len(indicator_results_structured["atr"]["atr"]) > 1:
+                    vol_trend = (
+                        "↗"
+                        if indicator_results_structured["atr"]["atr"][-1]
+                        > indicator_results_structured["atr"]["atr"][-2]
+                        else "↘"
+                    )
                     report_sections.append(
-                        f"  - Volatility Trend: {vol_trend} ({len(atr_output.atr)} data points)"
+                        f"  - Volatility Trend: {vol_trend} ({len(indicator_results_structured['atr']['atr'])} data points)"
                     )
 
-            elif atr_output.error:
-                report_sections.append(f"- US Stock ATR: Error - {atr_output.error}")
+            elif indicator_results_structured["atr"]["error"]:
+                report_sections.append(
+                    f"- US Stock ATR: Error - {indicator_results_structured['atr']['error']}"
+                )
 
         # 合成报告
         if not report_sections:
@@ -1078,3 +1748,92 @@ async def generate_us_stock_comprehensive_report(
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"US stock comprehensive analysis error: {str(e)}"
         )
+
+
+# ==================== 新增：股票筛选工具 ====================
+
+
+# @mcp.tool()
+# async def screen_stocks_by_criteria(
+#     ctx: Context,
+#     symbols: List[str],
+#     min_price: Optional[float] = None,
+#     max_price: Optional[float] = None,
+#     min_volume: Optional[int] = None,
+#     min_market_cap: Optional[float] = None,
+#     max_pe_ratio: Optional[float] = None,
+# ) -> dict:
+#     """
+#     根据条件筛选股票（新增工具）
+
+#     Args:
+#         symbols: 股票代码列表
+#         min_price: 最低价格
+#         max_price: 最高价格
+#         min_volume: 最小成交量
+#         min_market_cap: 最小市值
+#         max_pe_ratio: 最大市盈率
+#     """
+#     await ctx.info(f"Screening {len(symbols)} stocks with criteria")
+
+#     try:
+#         screened_stocks = []
+
+#         for symbol in symbols:
+#             try:
+#                 # 获取股票信息
+#                 stock_info = await fetch_us_stock_info(ctx, symbol)
+#                 if not stock_info:
+#                     continue
+
+#                 # 获取当前价格
+#                 stock_data = await fetch_us_stock_hist_data(ctx, symbol, "1d", "1d")
+#                 if not stock_data:
+#                     continue
+
+#                 current_price = stock_data[-1]["close"]
+#                 current_volume = stock_data[-1]["volume"]
+
+#                 # 应用筛选条件
+#                 if min_price is not None and current_price < min_price:
+#                     continue
+#                 if max_price is not None and current_price > max_price:
+#                     continue
+#                 if min_volume is not None and current_volume < min_volume:
+#                     continue
+#                 if min_market_cap is not None and stock_info.get("market_cap", 0) < min_market_cap:
+#                     continue
+#                 if max_pe_ratio is not None and stock_info.get("trailing_pe", float('inf')) > max_pe_ratio:
+#                     continue
+
+#                 screened_stocks.append({
+#                     "symbol": symbol,
+#                     "name": stock_info.get("company_name", ""),
+#                     "price": current_price,
+#                     "volume": current_volume,
+#                     "market_cap": stock_info.get("market_cap", 0),
+#                     "pe_ratio": stock_info.get("trailing_pe", None),
+#                     "sector": stock_info.get("sector", ""),
+#                 })
+
+#             except Exception as e:
+#                 await ctx.warning(f"Error screening {symbol}: {e}")
+#                 continue
+
+#         return {
+#             "success": True,
+#             "screened_stocks": screened_stocks,
+#             "original_count": len(symbols),
+#             "screened_count": len(screened_stocks),
+#             "criteria": {
+#                 "min_price": min_price,
+#                 "max_price": max_price,
+#                 "min_volume": min_volume,
+#                 "min_market_cap": min_market_cap,
+#                 "max_pe_ratio": max_pe_ratio,
+#             },
+#         }
+
+#     except Exception as e:
+#         await ctx.error(f"Error in stock screening: {e}")
+#         return {"success": False, "error": str(e)}

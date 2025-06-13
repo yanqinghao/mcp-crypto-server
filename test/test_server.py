@@ -186,101 +186,233 @@ async def test_hk_stock_tools(client):
 
 
 async def test_us_stock_tools(client):
-    """测试美股工具"""
+    """测试美股工具 - 完整版本"""
     print("\n=== 测试美股工具 ===")
 
-    # 美股数据获取测试
+    # ==================== 美股数据获取测试 ====================
     print("\n--- 美股数据获取 ---")
 
-    # 搜索美股
-    us_search_result = await client.call_tool_mcp(
-        "us_stock_tools_search_us_stock_symbols", {"query": "apple", "limit": 5}
-    )
-    print("美股搜索结果:", us_search_result.model_dump_json(indent=2))
+    # # 搜索美股
+    # print("1. 搜索美股...")
+    # us_search_result = await client.call_tool_mcp(
+    #     "us_stock_tools_search_us_stock_symbols", {"query": "apple", "limit": 5}
+    # )
+    # print("美股搜索结果:", us_search_result.model_dump_json(indent=2))
 
-    # 获取美股价格
-    us_price = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_price", {"inputs": PriceInput(symbol="AAPL")}
-    )
-    print("苹果当前价格:", us_price.model_dump_json(indent=2))
+    # # 验证股票代码
+    # print("\n2. 验证股票代码...")
+    # validation_result = await client.call_tool_mcp(
+    #     "us_stock_tools_validate_us_stock_symbol_tool", {"symbol": "AAPL"}
+    # )
+    # print("AAPL验证结果:", validation_result.model_dump_json(indent=2))
 
-    # 获取美股K线数据
-    us_candles = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_candles",
-        {"inputs": CandlesInput(symbol="AAPL", limit=30)},
-    )
-    print("苹果K线数据:", us_candles.model_dump_json(indent=2))
+    # # 按类型查找证券
+    # print("\n3. 查找ETF...")
+    # etf_lookup = await client.call_tool_mcp(
+    #     "us_stock_tools_lookup_us_securities",
+    #     {"query": "technology", "security_type": "etf", "count": 10}
+    # )
+    # print("科技ETF查找结果:", etf_lookup.model_dump_json(indent=2))
 
-    # 获取美股详细行情
-    us_ticker = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_ticker", {"inputs": TickerInput(symbol="AAPL")}
-    )
-    print("苹果详细行情:", us_ticker.model_dump_json(indent=2))
+    # # 获取美股价格
+    # print("\n4. 获取美股价格...")
+    # us_price = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_price",
+    #     {"inputs": {"symbol": "AAPL"}}
+    # )
+    # print("苹果当前价格:", us_price.model_dump_json(indent=2))
 
-    # 获取美股公司信息
-    us_info = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_info", {"symbol": "AAPL"}
-    )
-    print("苹果公司信息:", us_info.model_dump_json(indent=2))
+    # # 获取美股K线数据
+    # print("\n5. 获取美股K线数据...")
+    # us_candles = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_candles",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "limit": 30}},
+    # )
+    # print("苹果K线数据:", us_candles.model_dump_json(indent=2))
 
-    # 获取美股财务数据
-    us_financials = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_financials",
-        {"symbol": "AAPL", "statement_type": "income", "quarterly": False},
-    )
-    print("苹果财务数据:", us_financials.model_dump_json(indent=2))
+    # # 获取美股详细行情
+    # print("\n6. 获取美股详细行情...")
+    # us_ticker = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_ticker",
+    #     {"inputs": {"symbol": "AAPL"}}
+    # )
+    # print("苹果详细行情:", us_ticker.model_dump_json(indent=2))
 
-    # 获取美股期权数据
-    us_options = await client.call_tool_mcp(
-        "us_stock_tools_get_us_stock_options", {"symbol": "AAPL"}
-    )
-    print("苹果期权数据:", us_options.model_dump_json(indent=2))
+    # # 获取美股公司信息
+    # print("\n7. 获取美股公司信息...")
+    # us_info = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_info", {"symbol": "AAPL"}
+    # )
+    # print("苹果公司信息:", us_info.model_dump_json(indent=2))
 
-    # 美股技术分析测试
-    print("\n--- 美股技术分析 ---")
+    # # 获取美股财务数据
+    # print("\n8. 获取美股财务数据...")
+    # us_financials = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_financials",
+    #     {"symbol": "AAPL", "statement_type": "income", "quarterly": False},
+    # )
+    # print("苹果财务数据:", us_financials.model_dump_json(indent=2))
 
-    # 美股SMA
-    us_sma = await client.call_tool_mcp(
-        "us_stock_tools_calculate_us_stock_sma",
-        {"inputs": SmaInput(symbol="AAPL", period=20, history_len=10)},
-    )
-    print("苹果SMA:", us_sma.model_dump_json(indent=2))
+    # # 获取美股期权数据
+    # print("\n9. 获取美股期权数据...")
+    # us_options = await client.call_tool_mcp(
+    #     "us_stock_tools_get_us_stock_options", {"symbol": "AAPL"}
+    # )
+    # print("苹果期权数据:", us_options.model_dump_json(indent=2))
 
-    # 美股RSI
-    us_rsi = await client.call_tool_mcp(
-        "us_stock_tools_calculate_us_stock_rsi",
-        {"inputs": RsiInput(symbol="AAPL", period=14, history_len=10)},
-    )
-    print("苹果RSI:", us_rsi.model_dump_json(indent=2))
+    # # ==================== 新增市场数据工具测试 ====================
+    # print("\n--- 新增市场数据工具 ---")
 
-    # 美股MACD
-    us_macd = await client.call_tool_mcp(
-        "us_stock_tools_calculate_us_stock_macd",
-        {"inputs": MacdInput(symbol="AAPL", history_len=10)},
-    )
-    print("苹果MACD:", us_macd.model_dump_json(indent=2))
+    # # 获取市场指数
+    # print("\n10. 获取市场指数...")
+    # market_indices = await client.call_tool_mcp(
+    #     "us_stock_tools_get_market_indices",
+    #     {"indices": ["^GSPC", "^DJI", "^IXIC"], "period": "1mo", "interval": "1d"}
+    # )
+    # print("市场指数数据:", market_indices.model_dump_json(indent=2))
 
-    # 美股布林带
-    us_bbands = await client.call_tool_mcp(
-        "us_stock_tools_calculate_us_stock_bbands",
-        {"inputs": BbandsInput(symbol="AAPL", period=20, history_len=10)},
-    )
-    print("苹果布林带:", us_bbands.model_dump_json(indent=2))
+    # # 获取实时股票数据
+    # print("\n11. 获取实时股票数据...")
+    # realtime_data = await client.call_tool_mcp(
+    #     "us_stock_tools_get_realtime_stock_data",
+    #     {"symbols": ["AAPL", "MSFT", "GOOGL"]}
+    # )
+    # print("实时股票数据:", realtime_data.model_dump_json(indent=2))
 
-    # 美股ATR
-    us_atr = await client.call_tool_mcp(
-        "us_stock_tools_calculate_us_stock_atr",
-        {"inputs": AtrInput(symbol="AAPL", period=14, history_len=10)},
-    )
-    print("苹果ATR:", us_atr.model_dump_json(indent=2))
+    # # 获取分析师推荐
+    # print("\n12. 获取分析师推荐...")
+    # analyst_recs = await client.call_tool_mcp(
+    #     "us_stock_tools_get_analyst_recommendations",
+    #     {"symbol": "AAPL"}
+    # )
+    # print("苹果分析师推荐:", analyst_recs.model_dump_json(indent=2))
 
-    # 美股综合分析报告
-    print("\n--- 美股综合分析 ---")
+    # # 获取分红历史
+    # print("\n13. 获取分红历史...")
+    # dividend_history = await client.call_tool_mcp(
+    #     "us_stock_tools_get_dividend_history",
+    #     {"symbol": "AAPL", "period": "2y"}
+    # )
+    # print("苹果分红历史:", dividend_history.model_dump_json(indent=2))
+
+    # # ==================== 美股技术分析测试 ====================
+    # print("\n--- 美股技术分析 ---")
+
+    # # 美股SMA
+    # print("\n14. 计算美股SMA...")
+    # us_sma = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_sma",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "period": 20, "history_len": 10}},
+    # )
+    # print("苹果SMA:", us_sma.model_dump_json(indent=2))
+
+    # # 美股EMA (新增)
+    # print("\n15. 计算美股EMA...")
+    # us_ema = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_ema",
+    #     {"symbol": "AAPL", "period": 20, "timeframe": "1d", "history_len": 10}
+    # )
+    # print("苹果EMA:", us_ema.model_dump_json(indent=2))
+
+    # # 美股RSI
+    # print("\n16. 计算美股RSI...")
+    # us_rsi = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_rsi",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "period": 14, "history_len": 10}},
+    # )
+    # print("苹果RSI:", us_rsi.model_dump_json(indent=2))
+
+    # # 美股MACD
+    # print("\n17. 计算美股MACD...")
+    # us_macd = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_macd",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "history_len": 10}},
+    # )
+    # print("苹果MACD:", us_macd.model_dump_json(indent=2))
+
+    # # 美股布林带
+    # print("\n18. 计算美股布林带...")
+    # us_bbands = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_bbands",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "period": 20, "history_len": 10}},
+    # )
+    # print("苹果布林带:", us_bbands.model_dump_json(indent=2))
+
+    # # 美股ATR
+    # print("\n19. 计算美股ATR...")
+    # us_atr = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_atr",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "period": 14, "history_len": 10}},
+    # )
+    # print("苹果ATR:", us_atr.model_dump_json(indent=2))
+
+    # # ==================== 新增技术指标测试 ====================
+    # print("\n--- 新增技术指标 ---")
+
+    # 随机指标
+    # print("\n20. 计算随机指标...")
+    # us_stoch = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_stochastic",
+    #     {"symbol": "AAPL", "k_period": 14, "d_period": 3, "timeframe": "1d", "history_len": 10}
+    # )
+    # print("苹果随机指标:", us_stoch.model_dump_json(indent=2))
+
+    # # 威廉指标
+    # print("\n21. 计算威廉指标...")
+    # us_willr = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_williams_r",
+    #     {"symbol": "AAPL", "period": 14, "timeframe": "1d", "history_len": 10}
+    # )
+    # print("苹果威廉指标:", us_willr.model_dump_json(indent=2))
+
+    # 成交量指标
+    # print("\n22. 计算成交量指标...")
+    # us_volume = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_us_stock_volume_indicators",
+    #     {"symbol": "AAPL", "timeframe": "1d", "history_len": 10}
+    # )
+    # print("苹果成交量指标:", us_volume.model_dump_json(indent=2))
+
+    # # ==================== 风险管理工具测试 ====================
+    # print("\n--- 风险管理工具 ---")
+
+    # # 计算风险指标
+    # print("\n23. 计算风险指标...")
+    # risk_metrics = await client.call_tool_mcp(
+    #     "us_stock_tools_calculate_risk_metrics",
+    #     {"symbol": "AAPL", "period": "1y", "timeframe": "1d", "benchmark_symbol": "^GSPC"}
+    # )
+    # print("苹果风险指标:", risk_metrics.model_dump_json(indent=2))
+
+    # # ==================== 股票筛选工具测试 ====================
+    # print("\n--- 股票筛选工具 ---")
+
+    # # 股票筛选
+    # print("\n24. 股票筛选...")
+    # screening_result = await client.call_tool_mcp(
+    #     "us_stock_tools_screen_stocks_by_criteria",
+    #     {
+    #         "symbols": ["AAPL", "MSFT", "GOOGL", "AMZN", "TSLA"],
+    #         "min_price": 100.0,
+    #         "max_price": 500.0,
+    #         "min_volume": 1000000,
+    #         "max_pe_ratio": 50.0
+    #     }
+    # )
+    # print("股票筛选结果:", screening_result.model_dump_json(indent=2))
+
+    # # ==================== 美股综合分析测试 ====================
+    # print("\n--- 美股综合分析 ---")
+
+    # # 综合分析报告
+    print("\n25. 生成综合分析报告...")
     us_report = await client.call_tool_mcp(
         "us_stock_tools_generate_us_stock_comprehensive_report",
-        {"inputs": ComprehensiveAnalysisInput(symbol="AAPL", history_len=10)},
+        {"inputs": {"symbol": "AAPL", "timeframe": "1d", "history_len": 10}},
     )
     print("苹果综合分析报告:", us_report.model_dump_json(indent=2))
+
+    # print("\n=== 美股工具测试完成 ===")
 
 
 async def test_prompts_and_resources(client):
@@ -364,8 +496,8 @@ async def main():
             # 选择要测试的模块
             test_crypto = False  # 测试加密货币工具
             test_a_stock = False  # 测试A股工具
-            test_hk_stock = True  # 测试港股工具
-            test_us_stock = False  # 测试美股工具
+            test_hk_stock = False  # 测试港股工具
+            test_us_stock = True  # 测试美股工具
             test_prompts = False  # 测试提示符和资源
 
             if test_crypto:

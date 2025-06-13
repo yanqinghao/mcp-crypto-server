@@ -978,7 +978,7 @@ requires-dist = [
     { name = "python-dotenv", specifier = ">=1.1.0" },
     { name = "requests", specifier = ">=2.32.3" },
     { name = "ta-lib", specifier = ">=0.6.3" },
-    { name = "yfinance", specifier = ">=0.2.61" },
+    { name = "yfinance", specifier = ">=0.2.63" },
 ]
 
 [package.metadata.requires-dev]

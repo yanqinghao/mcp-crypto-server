@@ -982,8 +982,10 @@ async def generate_a_stock_comprehensive_report(
                     report_sections.append(
                         f"  - 趋势: {trend} ({len(indicator_results_structured['sma']['sma'])} 个数据点)"
                     )
-            elif sma_output.error:
-                report_sections.append(f"- A股SMA: 错误 - {sma_output.error}")
+            elif indicator_results_structured["sma"]["error"]:
+                report_sections.append(
+                    f"- A股SMA: 错误 - {indicator_results_structured['sma']['error']}"
+                )
 
         # RSI分析
         if "RSI" in indicators_to_run:
@@ -1024,8 +1026,10 @@ async def generate_a_stock_comprehensive_report(
                     report_sections.append(
                         f"  - 趋势: {trend} ({len(indicator_results_structured['rsi']['rsi'])} 个数据点)"
                     )
-            elif rsi_output.error:
-                report_sections.append(f"- A股RSI: 错误 - {rsi_output.error}")
+            elif indicator_results_structured["rsi"]["error"]:
+                report_sections.append(
+                    f"- A股RSI: 错误 - {indicator_results_structured['rsi']['error']}"
+                )
 
         # MACD分析
         if "MACD" in indicators_to_run:
@@ -1221,8 +1225,10 @@ async def generate_hk_stock_comprehensive_report(
                     report_sections.append(
                         f"  - 趋势: {trend} ({len(indicator_results_structured['sma']['sma'])} 个数据点)"
                     )
-            elif sma_output.error:
-                report_sections.append(f"- 港股SMA: 错误 - {sma_output.error}")
+            elif indicator_results_structured["sma"]["error"]:
+                report_sections.append(
+                    f"- 港股SMA: 错误 - {indicator_results_structured['sma']['error']}"
+                )
 
         # RSI分析
         if "RSI" in indicators_to_run:
@@ -1263,8 +1269,10 @@ async def generate_hk_stock_comprehensive_report(
                     report_sections.append(
                         f"  - 趋势: {trend} ({len(indicator_results_structured['rsi']['rsi'])} 个数据点)"
                     )
-            elif rsi_output.error:
-                report_sections.append(f"- 港股RSI: 错误 - {rsi_output.error}")
+            elif indicator_results_structured["rsi"]["error"]:
+                report_sections.append(
+                    f"- 港股RSI: 错误 - {indicator_results_structured['rsi']['error']}"
+                )
 
         # 合成报告
         if not report_sections:
