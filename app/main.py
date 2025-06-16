@@ -6,6 +6,7 @@ from config import settings
 # Import tools from their respective modules
 from tools.crypto_tools import mcp as crypto_tools
 from tools.ak_stock_tools import mcp as ak_stock_tools
+from tools.etf_tools import mcp as etf_tools
 from tools.us_stock_tools import mcp as us_stock_tools
 from prompts.analysis_prompts import mcp as analysis_prompts
 from resources.market_info_resources import mcp as market_info_resources
@@ -29,6 +30,7 @@ mcp_server = FastMCP(
 # --- Import Tools into the Main Server ---
 mcp_server.mount("crypto_tools", crypto_tools)
 mcp_server.mount("a_hk_stock_tools", ak_stock_tools)
+mcp_server.mount("etf_tools", etf_tools)
 mcp_server.mount("us_stock_tools", us_stock_tools)
 mcp_server.mount("analysis_prompts", analysis_prompts)
 mcp_server.mount("market_info_resources", market_info_resources)

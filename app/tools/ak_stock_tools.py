@@ -593,7 +593,6 @@ async def calculate_a_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, "daily", required_candles, "close", "a_stock"
         )
-
         if close_prices is None or len(close_prices) < required_candles:
             return SmaOutput(
                 **output_base, error="Failed to fetch sufficient A-stock data for SMA."
@@ -1070,8 +1069,10 @@ async def generate_a_stock_comprehensive_report(
                 elif latest_hist < 0 and latest_macd < latest_signal:
                     report_sections.append("  - 注意: MACD柱状图为负，可能有看跌动量")
 
-            elif macd_output.error:
-                report_sections.append(f"- A股MACD: 错误 - {macd_output.error}")
+            elif indicator_results_structured["macd"]["error"]:
+                report_sections.append(
+                    f"- A股MACD: 错误 - {indicator_results_structured['macd']['error']}"
+                )
 
         # Bollinger Bands分析
         if "BBANDS" in indicators_to_run:
@@ -1108,8 +1109,10 @@ async def generate_a_stock_comprehensive_report(
                 )
                 report_sections.append(f"  - 带宽: ¥{latest_upper - latest_lower:.2f}")
 
-            elif bbands_output.error:
-                report_sections.append(f"- A股布林带: 错误 - {bbands_output.error}")
+            elif indicator_results_structured["bbands"]["error"]:
+                report_sections.append(
+                    f"- A股布林带: 错误 - {indicator_results_structured['bbands']['error']}"
+                )
 
         # 合成报告
         if not report_sections:
@@ -1294,6 +1297,9 @@ async def generate_hk_stock_comprehensive_report(
         )
 
     except Exception as e:
+        import traceback
+
+        traceback.print_exc()
         await ctx.error(
             f"Error in HK stock comprehensive report for {inputs.symbol}: {e}",
         )
