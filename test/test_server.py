@@ -934,7 +934,7 @@ async def test_prompts_and_resources(client):
 async def main():
     """主测试函数"""
     # Connect via SSE
-    client = Client(transport="http://localhost:8888/sse")
+    client = Client(transport="http://localhost:8000/sse")
     async with client:
         try:
             # 选择要测试的模块

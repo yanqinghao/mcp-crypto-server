@@ -374,13 +374,13 @@ async def get_etf_candles(ctx: Context, inputs: ETFCandlesInput) -> CandlesOutpu
         - 不同市场的价格精度可能不同
     """
     await ctx.info(
-        f"Fetching ETF candles for {inputs.symbol} ({inputs.timeframe.value}) in {inputs.market_type.value} market"
+        f"Fetching ETF candles for {inputs.symbol} ({inputs.timeframe}) in {inputs.market_type.value} market"
     )
 
     try:
         # 转换时间框架
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        period = period_map.get(inputs.timeframe.value, "daily")
+        period = period_map.get(inputs.timeframe, "daily")
 
         # 获取复权类型
         adjust = getattr(inputs, "adjust", "qfq") or "qfq"
@@ -431,14 +431,14 @@ async def get_etf_candles(ctx: Context, inputs: ETFCandlesInput) -> CandlesOutpu
 
             return CandlesOutput(
                 symbol=inputs.symbol,
-                timeframe=inputs.timeframe.value,
+                timeframe=inputs.timeframe,
                 candles=candles,
                 count=len(candles),
             )
         else:
             return CandlesOutput(
                 symbol=inputs.symbol,
-                timeframe=inputs.timeframe.value,
+                timeframe=inputs.timeframe,
                 error=f"No ETF candle data available for {inputs.symbol}",
             )
 
@@ -449,7 +449,7 @@ async def get_etf_candles(ctx: Context, inputs: ETFCandlesInput) -> CandlesOutpu
         await ctx.error(f"Error fetching ETF candles for {inputs.symbol}: {e}")
         return CandlesOutput(
             symbol=inputs.symbol,
-            timeframe=inputs.timeframe.value,
+            timeframe=inputs.timeframe,
             error=f"ETF data error: {str(e)}",
         )
 
@@ -1701,9 +1701,13 @@ async def calculate_etf_sma(
     }
 
     try:
+        # 转换时间框架
+        period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
+        period = period_map.get(inputs.timeframe, "daily")
+
         required_candles = inputs.period + inputs.history_len - 1
         close_prices = await _fetch_etf_single_series_data(
-            ctx, inputs.symbol, market_type.value, required_candles, "close"
+            ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
         if close_prices is None or len(close_prices) < required_candles:
@@ -1924,9 +1928,12 @@ async def calculate_etf_rsi(
     }
 
     try:
+        # 转换时间框架
+        period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
+        period = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len
         close_prices = await _fetch_etf_single_series_data(
-            ctx, inputs.symbol, market_type.value, required_candles, "close"
+            ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
         if close_prices is None or len(close_prices) < required_candles:
@@ -2175,11 +2182,14 @@ async def calculate_etf_macd(
     }
 
     try:
+        # 转换时间框架
+        period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
+        period = period_map.get(inputs.timeframe, "daily")
         required_candles = (
             inputs.slow_period + inputs.signal_period + inputs.history_len + 10
         )
         close_prices = await _fetch_etf_single_series_data(
-            ctx, inputs.symbol, market_type.value, required_candles, "close"
+            ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
         if close_prices is None or len(close_prices) < required_candles:
@@ -2434,9 +2444,12 @@ async def calculate_etf_bbands(
     }
 
     try:
+        # 转换时间框架
+        period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
+        period = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len - 1
         close_prices = await _fetch_etf_single_series_data(
-            ctx, inputs.symbol, market_type.value, required_candles, "close"
+            ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
         if close_prices is None or len(close_prices) < required_candles:
@@ -2715,11 +2728,15 @@ async def calculate_etf_atr(
     }
 
     try:
+        # 转换时间框架
+        period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
+        period = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len - 1
 
         price_data = await _fetch_etf_multi_series_data(
             ctx,
             inputs.symbol,
+            period,
             market_type.value,
             required_candles,
             ["high", "low", "close"],
@@ -3052,6 +3069,10 @@ async def generate_etf_comprehensive_report(
         - report_text: 中文分析报告
         - structured_data: 结构化指标数据
         - error: 错误信息(如果有)
+        market_type: 市场类型分为以下三种
+        - A
+        - HK
+        - US
 
     报告内容:
     - 各技术指标的最新值

@@ -273,7 +273,7 @@ async def get_a_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOutp
     try:
         # 转换时间框架
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        period = period_map.get(inputs.timeframe.value, "daily")
+        period = period_map.get(inputs.timeframe, "daily")
 
         # 获取复权类型
         adjust = getattr(inputs, "adjust", "qfq") or "qfq"
@@ -585,7 +585,7 @@ async def get_hk_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOut
 
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        period = period_map.get(inputs.timeframe.value, "daily")
+        period = period_map.get(inputs.timeframe, "daily")
 
         # 计算日期范围
         end_date = datetime.now().strftime("%Y%m%d")
@@ -750,7 +750,7 @@ async def calculate_a_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         # SMA需要period + history_len - 1个数据点
         required_candles = inputs.period + inputs.history_len - 1
         close_prices = await _fetch_single_series_data(
@@ -828,7 +828,7 @@ async def calculate_a_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         # RSI需要period + history_len个数据点
         required_candles = inputs.period + inputs.history_len
         close_prices = await _fetch_single_series_data(
@@ -904,7 +904,7 @@ async def calculate_a_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         required_candles = (
             inputs.slow_period + inputs.signal_period + inputs.history_len + 10
         )
@@ -994,7 +994,7 @@ async def calculate_a_stock_bbands(ctx: Context, inputs: BbandsInput) -> BbandsO
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len - 1
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, timeframe, required_candles, "close", "a_stock"
@@ -1082,7 +1082,7 @@ async def calculate_a_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len - 1
 
         price_data = await _fetch_multi_series_data(
@@ -1158,7 +1158,7 @@ async def calculate_hk_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len - 1
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, timeframe, required_candles, "close", "hk_stock"
@@ -1214,7 +1214,7 @@ async def calculate_hk_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
     }
     try:
         period_map = {"1d": "daily", "1w": "weekly", "1M": "monthly"}
-        timeframe = period_map.get(inputs.timeframe.value, "daily")
+        timeframe = period_map.get(inputs.timeframe, "daily")
         required_candles = inputs.period + inputs.history_len
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, timeframe, required_candles, "close", "hk_stock"
