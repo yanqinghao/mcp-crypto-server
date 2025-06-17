@@ -233,6 +233,7 @@ async def fetch_stock_realtime_data(
 async def fetch_hk_stock_data(
     ctx: Context,
     symbol: str,
+    period: str = "daily",
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     max_retries: int = 3,
@@ -263,7 +264,7 @@ async def fetch_hk_stock_data(
             )
 
             # 构建请求参数
-            kwargs = {"symbol": symbol}
+            kwargs = {"symbol": symbol, "period": period}
             if start_date:
                 kwargs["start_date"] = start_date
             if end_date:
