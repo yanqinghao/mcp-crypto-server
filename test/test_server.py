@@ -150,16 +150,22 @@ async def test_hk_stock_tools(client):
     # 港股数据获取测试
     print("\n--- 港股数据获取 ---")
 
+    # 搜索股票
+    search_result = await client.call_tool_mcp(
+        "a_hk_stock_tools_search_hk_stock_symbols", {"query": "比亚迪", "limit": 5}
+    )
+    print("港股搜索结果:", search_result.model_dump_json(indent=2))
+
     # 获取港股价格
     hk_price = await client.call_tool_mcp(
-        "a_hk_stock_tools_get_hk_stock_price", {"inputs": PriceInput(symbol="00700")}
+        "a_hk_stock_tools_get_hk_stock_price", {"inputs": PriceInput(symbol="01211")}
     )
     print("腾讯控股当前价格:", hk_price.model_dump_json(indent=2))
 
     # 获取港股K线数据
     hk_candles = await client.call_tool_mcp(
         "a_hk_stock_tools_get_hk_stock_candles",
-        {"inputs": CandlesInput(symbol="00700", limit=30)},
+        {"inputs": CandlesInput(symbol="01211", limit=30)},
     )
     print("腾讯控股K线数据:", hk_candles.model_dump_json(indent=2))
 
@@ -169,14 +175,14 @@ async def test_hk_stock_tools(client):
     # 港股SMA
     hk_sma = await client.call_tool_mcp(
         "a_hk_stock_tools_calculate_hk_stock_sma",
-        {"inputs": SmaInput(symbol="00700", period=20, history_len=10)},
+        {"inputs": SmaInput(symbol="01211", period=20, history_len=10)},
     )
     print("腾讯控股SMA:", hk_sma.model_dump_json(indent=2))
 
     # 港股RSI
     hk_rsi = await client.call_tool_mcp(
         "a_hk_stock_tools_calculate_hk_stock_rsi",
-        {"inputs": RsiInput(symbol="00700", period=14, history_len=10)},
+        {"inputs": RsiInput(symbol="01211", period=14, history_len=10)},
     )
     print("腾讯控股RSI:", hk_rsi.model_dump_json(indent=2))
 
@@ -184,7 +190,7 @@ async def test_hk_stock_tools(client):
     print("\n--- 港股综合分析 ---")
     hk_report = await client.call_tool_mcp(
         "a_hk_stock_tools_generate_hk_stock_comprehensive_report",
-        {"inputs": ComprehensiveAnalysisInput(symbol="00700", history_len=10)},
+        {"inputs": ComprehensiveAnalysisInput(symbol="01211", history_len=10)},
     )
     print("腾讯控股综合分析报告:", hk_report.model_dump_json(indent=2))
 
@@ -940,9 +946,9 @@ async def main():
             # 选择要测试的模块
             test_crypto = False  # 测试加密货币工具
             test_a_stock = False  # 测试A股工具
-            test_hk_stock = False  # 测试港股工具
+            test_hk_stock = True  # 测试港股工具
             test_us_stock = False  # 测试美股工具
-            test_etf_stock = True  # 测试ETF工具
+            test_etf_stock = False  # 测试ETF工具
             test_prompts = False  # 测试提示符和资源
 
             if test_crypto:

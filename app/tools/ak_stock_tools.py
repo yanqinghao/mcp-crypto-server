@@ -36,6 +36,7 @@ from services.akshare_service import (
     fetch_stock_realtime_data,
     fetch_hk_stock_data,
     search_stock_by_name,
+    search_hk_stock_by_name,
 )
 
 mcp = FastMCP()
@@ -227,44 +228,12 @@ async def get_a_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOutp
     """
     获取A股K线数据
 
-    该工具从AKShare获取A股（沪深交易所）的历史K线数据，支持多种时间周期和复权方式。
-    适用于技术分析、量化交易策略开发和市场研究。
-
-    功能特点:
-    - 支持日线、周线、月线数据
-    - 支持前复权、后复权和不复权
-    - 自动处理数据质量问题
-    - 返回标准OHLCV格式
-
     Args:
-        inputs.symbol (str): A股代码，6位数字格式 (如: '000001'平安银行, '600519'贵州茅台)
-        inputs.timeframe (TimeFrame): 时间框架，支持 '1d'(日线), '1w'(周线), '1M'(月线)
-        inputs.limit (int): 返回的K线数量，范围1-1000，默认24
-        inputs.adjust (str): 复权类型 - 'qfq'前复权(默认), 'hfq'后复权, ''不复权
+        ctx: FastMCP上下文对象
+        inputs: A股K线输入参数，包含symbol（A股代码，6位数字）、timeframe（时间框架）、limit（数据条数，默认24）、adjust（复权类型，默认qfq）
 
     Returns:
-        CandlesOutput: 包含K线数据的输出对象
-        - symbol: 股票代码
-        - timeframe: 时间框架
-        - candles: OHLCVCandle对象列表，按时间顺序排列
-        - count: 实际返回的K线数量
-        - error: 错误信息(如果有)
-
-    Example:
-        获取平安银行最近30天的前复权日K线:
-        >>> inputs = CandlesInput(
-        ...     symbol="000001",
-        ...     timeframe=TimeFrame.ONE_DAY,
-        ...     limit=30,
-        ...     adjust="qfq"
-        ... )
-        >>> result = await get_a_stock_candles(ctx, inputs)
-        >>> print(f"获取到{result.count}根K线")
-
-    Note:
-        - 实际返回的数据量可能少于请求量，取决于交易日历和数据可用性
-        - 前复权数据已调整历史价格以反映分红配股影响
-        - 数据来源可能有15-20分钟延迟
+        CandlesOutput: K线数据输出对象，包含symbol、timeframe、candles列表、count和可能的error信息
     """
     await ctx.info(
         f"Fetching A-stock candles for {inputs.symbol} ({inputs.timeframe.value})"
@@ -352,30 +321,12 @@ async def get_a_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
     """
     获取A股当前价格
 
-    该工具获取A股的实时或最新价格信息，优先使用实时数据API，
-    如果不可用则回退到最新的历史数据。
-
-    功能特点:
-    - 实时价格获取(可能有15-20分钟延迟)
-    - 自动回退到历史数据
-    - 价格数据验证
-    - 统一的错误处理
-
     Args:
-        inputs.symbol (str): A股代码，6位数字格式
+        ctx: FastMCP上下文对象
+        inputs: A股价格输入参数，包含symbol（A股代码，6位数字）
 
     Returns:
-        PriceOutput: 包含价格信息的输出对象
-        - symbol: 股票代码
-        - price: 当前价格(人民币)
-        - timestamp: 价格时间戳(毫秒)
-        - error: 错误信息(如果有)
-
-    Example:
-        >>> inputs = PriceInput(symbol="000001")
-        >>> result = await get_a_stock_price(ctx, inputs)
-        >>> if result.price:
-        ...     print(f"平安银行当前价格: ¥{result.price:.2f}")
+        PriceOutput: 价格输出对象，包含symbol、price、timestamp和可能的error信息
     """
     await ctx.info(f"Fetching A-stock current price for {inputs.symbol}")
 
@@ -430,40 +381,13 @@ async def search_a_stock_symbols(ctx: Context, query: str, limit: int = 10) -> d
     """
     搜索A股股票代码
 
-    该工具通过公司名称、股票简称或代码搜索A股市场的股票，
-    支持模糊匹配和中文搜索。
-
-    功能特点:
-    - 支持中文公司名称搜索
-    - 支持股票代码精确匹配
-    - 支持拼音缩写搜索
-    - 返回详细的股票信息
-
     Args:
-        query (str): 搜索关键词，可以是:
-            - 公司名称: "平安银行", "贵州茅台"
-            - 股票代码: "000001", "600519"
-            - 简称: "平安", "茅台"
-        limit (int): 返回结果的最大数量，默认10
+        ctx: FastMCP上下文对象
+        query: 搜索关键词（公司名称、股票代码或简称）
+        limit: 返回结果数量，默认10
 
     Returns:
-        Dict包含搜索结果:
-        - success (bool): 搜索是否成功
-        - query (str): 搜索关键词
-        - market_type (str): 市场类型 "a_stock"
-        - results (List[Dict]): 匹配的股票列表，每个包含:
-            - code: 股票代码
-            - name: 股票名称
-            - market: 交易所(SZ/SH)
-        - count (int): 结果数量
-        - error (str): 错误信息(如果有)
-
-    Example:
-        搜索平安相关股票:
-        >>> result = await search_a_stock_symbols(ctx, "平安", 5)
-        >>> if result["success"]:
-        ...     for stock in result["results"]:
-        ...         print(f"{stock['code']}: {stock['name']}")
+        dict: 包含success状态、query查询词、market_type市场类型、results结果列表、count结果数量或error错误信息的字典
     """
     await ctx.info(f"Searching A-stock symbols for '{query}'")
 
@@ -499,26 +423,62 @@ async def search_a_stock_symbols(ctx: Context, query: str, limit: int = 10) -> d
 
 
 @mcp.tool()
+async def search_hk_stock_symbols(ctx: Context, query: str, limit: int = 10) -> dict:
+    """
+    搜索A股股票代码
+
+    Args:
+        ctx: FastMCP上下文对象
+        query: 搜索关键词（公司名称、股票代码或简称）
+        limit: 返回结果数量，默认10
+
+    Returns:
+        dict: 包含success状态、query查询词、market_type市场类型、results结果列表、count结果数量或error错误信息的字典
+    """
+    await ctx.info(f"Searching A-stock symbols for '{query}'")
+
+    try:
+        results = await search_hk_stock_by_name(ctx, query)
+
+        if results:
+            # 限制结果数量
+            limited_results = results[:limit]
+            return {
+                "success": True,
+                "query": query,
+                "market_type": "a_stock",
+                "results": limited_results,
+                "count": len(limited_results),
+            }
+        else:
+            return {
+                "success": False,
+                "query": query,
+                "market_type": "a_stock",
+                "error": "No matching stocks found",
+            }
+
+    except Exception as e:
+        await ctx.error(f"Error searching A-stock symbols: {e}")
+        return {
+            "success": False,
+            "query": query,
+            "market_type": "a_stock",
+            "error": str(e),
+        }
+
+
+@mcp.tool()
 async def get_a_stock_ticker(ctx: Context, inputs: TickerInput) -> TickerOutput:
     """
     获取A股详细行情数据
 
-    该工具获取A股的详细实时行情信息，包括开高低收、成交量、
-    涨跌幅等关键市场数据。
-
     Args:
-        inputs.symbol (str): A股代码
+        ctx: FastMCP上下文对象
+        inputs: A股行情输入参数，包含symbol（A股代码）
 
     Returns:
-        TickerOutput: 详细行情数据
-        - symbol: 股票代码
-        - last: 最新价
-        - open/high/low/close: 开高低收价
-        - volume: 成交量
-        - change: 价格变化
-        - percentage: 涨跌幅百分比
-        - timestamp: 数据时间戳
-        - error: 错误信息(如果有)
+        TickerOutput: 详细行情输出对象，包含symbol、last、open、high、low、close、volume、change、percentage、timestamp和可能的error信息
     """
     await ctx.info(f"Fetching A-stock ticker for {inputs.symbol}")
 
@@ -563,21 +523,12 @@ async def get_hk_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOut
     """
     获取港股K线数据
 
-    该工具从数据源获取香港交易所股票的历史K线数据。
-    港股市场交易时间与A股不同，数据格式经过标准化处理。
-
     Args:
-        inputs.symbol (str): 港股代码，5位数字格式 (如: '00700'腾讯, '09988'阿里巴巴)
-        inputs.timeframe (TimeFrame): 时间框架
-        inputs.limit (int): K线数量
+        ctx: FastMCP上下文对象
+        inputs: 港股K线输入参数，包含symbol（港股代码，5位数字）、timeframe（时间框架）、limit（数据条数）
 
     Returns:
-        CandlesOutput: 港股K线数据，价格单位为港币
-
-    Note:
-        - 港股代码通常为5位数字，前面补0
-        - 价格单位为港币(HK$)
-        - 交易时间: 9:30-12:00, 13:00-16:00 (港时)
+        CandlesOutput: K线数据输出对象，包含symbol、timeframe、candles列表、count和可能的error信息
     """
     await ctx.info(
         f"Fetching HK stock candles for {inputs.symbol} ({inputs.timeframe.value})"
@@ -655,13 +606,12 @@ async def get_hk_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
     """
     获取港股当前价格
 
-    获取香港交易所股票的最新价格信息。
-
     Args:
-        inputs.symbol (str): 港股代码
+        ctx: FastMCP上下文对象
+        inputs: 港股价格输入参数，包含symbol（港股代码）
 
     Returns:
-        PriceOutput: 港股价格数据，价格单位为港币
+        PriceOutput: 价格输出对象，包含symbol、price、timestamp和可能的error信息
     """
     await ctx.info(f"Fetching HK stock current price for {inputs.symbol}")
 
@@ -670,7 +620,9 @@ async def get_hk_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
         end_date = datetime.now().strftime("%Y%m%d")
         start_date = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
 
-        stock_data = await fetch_hk_stock_data(ctx, inputs.symbol, start_date, end_date)
+        stock_data = await fetch_hk_stock_data(
+            ctx, inputs.symbol, "daily", start_date, end_date
+        )
 
         if stock_data and len(stock_data) > 0:
             latest = stock_data[-1]
@@ -704,41 +656,14 @@ async def get_hk_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
 @mcp.tool()
 async def calculate_a_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
     """
-    计算A股简单移动平均线 (Simple Moving Average)
-
-    SMA是最基础的技术指标，通过计算指定期间的平均价格来平滑价格波动，
-    帮助识别价格趋势。常用于判断支撑阻力位和趋势方向。
-
-    计算公式:
-    SMA(n) = (P1 + P2 + ... + Pn) / n
-
-    其中P为收盘价，n为周期数
+    计算A股简单移动平均线（SMA）
 
     Args:
-        inputs.symbol (str): A股代码
-        inputs.period (int): 计算周期，常用值: 5, 10, 20, 50, 200
-        inputs.history_len (int): 返回的历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: SMA输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为20）、history_len（历史数据长度，默认5）
 
     Returns:
-        SmaOutput: SMA计算结果
-        - symbol: 股票代码
-        - timeframe: 时间框架
-        - period: 计算周期
-        - sma: SMA值列表，按时间顺序排列
-        - error: 错误信息(如果有)
-
-    应用场景:
-    - 趋势判断: 价格在SMA上方表示上升趋势
-    - 支撑阻力: SMA线常作为动态支撑或阻力位
-    - 交易信号: 价格穿越SMA产生买卖信号
-
-    Example:
-        计算平安银行20日均线:
-        >>> inputs = SmaInput(symbol="000001", period=20, history_len=10)
-        >>> result = await calculate_a_stock_sma(ctx, inputs)
-        >>> if result.sma:
-        ...     print(f"最新20日均线: ¥{result.sma[-1]:.2f}")
+        SmaOutput: SMA输出对象，包含symbol、timeframe、period、sma指标值或error错误信息
     """
     await ctx.info(
         f"Calculating A-stock SMA for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
@@ -783,40 +708,14 @@ async def calculate_a_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
 @mcp.tool()
 async def calculate_a_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
     """
-    计算A股相对强弱指数 (Relative Strength Index)
-
-    RSI是威尔斯·威尔德开发的动量震荡指标，用于衡量价格变动的速度和变化。
-    RSI在0-100之间波动，帮助识别超买超卖状态。
-
-    计算逻辑:
-    1. 计算每日价格变化
-    2. 分别计算上涨和下跌的平均值
-    3. RS = 平均上涨 / 平均下跌
-    4. RSI = 100 - (100 / (1 + RS))
+    计算A股相对强弱指数（RSI）
 
     Args:
-        inputs.symbol (str): A股代码
-        inputs.period (int): 计算周期，默认14，常用值: 6, 9, 14, 21
-        inputs.history_len (int): 返回的历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: RSI输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为14）、history_len（历史数据长度，默认5）
 
     Returns:
-        RsiOutput: RSI计算结果
-        - rsi: RSI值列表 (0-100)
-
-    交易信号:
-    - RSI > 70: 超买状态，可能的卖出信号
-    - RSI < 30: 超卖状态，可能的买入信号
-    - RSI 50: 中性水平，上下穿越表示趋势变化
-
-    Example:
-        >>> inputs = RsiInput(symbol="000001", period=14, history_len=5)
-        >>> result = await calculate_a_stock_rsi(ctx, inputs)
-        >>> latest_rsi = result.rsi[-1]
-        >>> if latest_rsi > 70:
-        ...     print("超买状态")
-        >>> elif latest_rsi < 30:
-        ...     print("超卖状态")
+        RsiOutput: RSI输出对象，包含symbol、timeframe、period、rsi指标值或error错误信息
     """
     await ctx.info(
         f"Calculating A-stock RSI for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
@@ -862,35 +761,14 @@ async def calculate_a_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
 @mcp.tool()
 async def calculate_a_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
     """
-    计算A股MACD指标 (Moving Average Convergence Divergence)
-
-    MACD由Gerald Appel开发，是趋势跟踪动量指标。通过比较两个不同周期的
-    指数移动平均线来识别趋势变化和动量。
-
-    组成部分:
-    1. MACD线: 快线EMA - 慢线EMA
-    2. 信号线: MACD线的EMA
-    3. 柱状图: MACD线 - 信号线
+    计算A股MACD指标
 
     Args:
-        inputs.fast_period (int): 快线周期，默认12
-        inputs.slow_period (int): 慢线周期，默认26
-        inputs.signal_period (int): 信号线周期，默认9
-        inputs.symbol (str): A股代码
-        inputs.history_len (int): 返回的历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: MACD输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、fast_period（快线周期，默认为12）、slow_period（慢线周期，默认为26）、signal_period（信号线周期，默认为9）、history_len（历史数据长度，默认5）
 
     Returns:
-        MacdOutput: MACD计算结果
-        - macd: MACD线值列表
-        - signal: 信号线值列表
-        - histogram: 柱状图值列表
-
-    交易信号:
-    - MACD上穿信号线: 买入信号
-    - MACD下穿信号线: 卖出信号
-    - 柱状图由负转正: 上升动量
-    - 柱状图由正转负: 下降动量
+        MacdOutput: MACD输出对象，包含symbol、timeframe、fast_period、slow_period、signal_period、macd主线、signal信号线、histogram柱状图或error错误信息
     """
     await ctx.info(
         f"Calculating A-stock MACD for {inputs.symbol}, Periods: {inputs.fast_period}/{inputs.slow_period}/{inputs.signal_period}"
@@ -949,37 +827,14 @@ async def calculate_a_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
 @mcp.tool()
 async def calculate_a_stock_bbands(ctx: Context, inputs: BbandsInput) -> BbandsOutput:
     """
-    计算A股布林带 (Bollinger Bands)
-
-    布林带由约翰·博林格开发，是基于统计学的技术指标。
-    由中轨(移动平均线)和上下轨(标准差)组成，用于判断价格的相对高低。
-
-    构成:
-    - 中轨: n期简单移动平均线
-    - 上轨: 中轨 + k × n期标准差
-    - 下轨: 中轨 - k × n期标准差
-
-    其中k通常为2，n通常为20
+    计算A股布林带（Bollinger Bands）
 
     Args:
-        inputs.period (int): 移动平均周期，默认20
-        inputs.nbdevup (float): 上轨标准差倍数，默认2.0
-        inputs.nbdevdn (float): 下轨标准差倍数，默认2.0
-        inputs.symbol (str): A股代码
-        inputs.history_len (int): 返回的历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: 布林带输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为20）、nbdevup（上轨标准差倍数，默认为2.0）、nbdevdn（下轨标准差倍数，默认为2.0）、matype（移动平均类型，默认为0）、history_len（历史数据长度，默认5）
 
     Returns:
-        BbandsOutput: 布林带计算结果
-        - upper_band: 上轨值列表
-        - middle_band: 中轨值列表
-        - lower_band: 下轨值列表
-
-    应用:
-    - 价格接近上轨: 可能超买
-    - 价格接近下轨: 可能超卖
-    - 带宽收窄: 波动率降低，可能突破
-    - 带宽扩张: 波动率增加，趋势加强
+        BbandsOutput: 布林带输出对象，包含symbol、timeframe、period、nbdevup、nbdevdn、matype、upper_band上轨、middle_band中轨、lower_band下轨或error错误信息
     """
     await ctx.info(
         f"Calculating A-stock Bollinger Bands for {inputs.symbol}, Period: {inputs.period}"
@@ -1046,31 +901,14 @@ async def calculate_a_stock_bbands(ctx: Context, inputs: BbandsInput) -> BbandsO
 @mcp.tool()
 async def calculate_a_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
     """
-    计算A股平均真实波幅 (Average True Range)
-
-    ATR由威尔斯·威尔德开发，用于衡量市场波动性。
-    真实波幅是以下三者中的最大值：
-    1. 当日最高价 - 当日最低价
-    2. |当日最高价 - 前日收盘价|
-    3. |当日最低价 - 前日收盘价|
-
-    ATR是真实波幅的移动平均值。
+    计算A股平均真实波幅（ATR）
 
     Args:
-        inputs.period (int): 计算周期，默认14
-        inputs.symbol (str): A股代码
-        inputs.history_len (int): 返回的历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: ATR输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为14）、history_len（历史数据长度，默认5）
 
     Returns:
-        AtrOutput: ATR计算结果
-        - atr: ATR值列表
-
-    应用:
-    - 止损设置: ATR × 倍数作为止损距离
-    - 仓位管理: 根据ATR调整仓位大小
-    - 突破确认: 价格变动 > ATR表示有效突破
-    - 市场状态: ATR增大表示波动加剧
+        AtrOutput: ATR输出对象，包含symbol、timeframe、period、atr指标值或error错误信息
     """
     await ctx.info(
         f"Calculating A-stock ATR for {inputs.symbol}, Period: {inputs.period}"
@@ -1135,18 +973,14 @@ async def calculate_a_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
 @mcp.tool()
 async def calculate_hk_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
     """
-    计算港股简单移动平均线 (SMA)
-
-    功能与A股SMA相同，但数据来源为香港交易所，价格单位为港币。
+    计算港股简单移动平均线（SMA）
 
     Args:
-        inputs.symbol (str): 港股代码
-        inputs.period (int): 计算周期
-        inputs.history_len (int): 历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: SMA输入参数，包含symbol（港股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为20）、history_len（历史数据长度，默认5）
 
     Returns:
-        SmaOutput: 港股SMA结果，价格单位为港币
+        SmaOutput: SMA输出对象，包含symbol、timeframe、period、sma指标值或error错误信息
     """
     await ctx.info(
         f"Calculating HK stock SMA for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
@@ -1191,18 +1025,14 @@ async def calculate_hk_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
 @mcp.tool()
 async def calculate_hk_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
     """
-    计算港股相对强弱指数 (RSI)
-
-    功能与A股RSI相同，适用于港股市场分析。
+    计算港股相对强弱指数（RSI）
 
     Args:
-        inputs.symbol (str): 港股代码
-        inputs.period (int): 计算周期
-        inputs.history_len (int): 历史数据长度
-        inputs.timeframe (str): 时间框架
+        ctx: FastMCP上下文对象
+        inputs: RSI输入参数，包含symbol（港股代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为14）、history_len（历史数据长度，默认5）
 
     Returns:
-        RsiOutput: 港股RSI结果
+        RsiOutput: RSI输出对象，包含symbol、timeframe、period、rsi指标值或error错误信息
     """
     await ctx.info(
         f"Calculating HK stock RSI for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
@@ -1254,51 +1084,12 @@ async def generate_a_stock_comprehensive_report(
     """
     生成A股综合技术分析报告
 
-    该工具整合多个技术指标，生成全面的A股技术分析报告。
-    报告包含数值结果、趋势分析和交易信号提示。
-
-    功能特点:
-    - 多指标综合分析
-    - 智能趋势判断
-    - 超买超卖提示
-    - 结构化数据输出
-    - 中文分析报告
-
     Args:
-        inputs.symbol (str): A股代码
-        inputs.timeframe (str): 时间框架，默认"1d"
-        inputs.history_len (int): 历史数据长度，默认10
-        inputs.indicators_to_include (List[str]): 要包含的指标列表，默认["SMA", "RSI", "MACD", "BBANDS"]
-        inputs.sma_period (int): SMA周期，默认20
-        inputs.rsi_period (int): RSI周期，默认14
-        inputs.macd_fast_period (int): MACD快线周期，默认12
-        inputs.macd_slow_period (int): MACD慢线周期，默认26
-        inputs.macd_signal_period (int): MACD信号线周期，默认9
-        inputs.bbands_period (int): 布林带周期，默认20
+        ctx: FastMCP上下文对象
+        inputs: 综合分析输入参数，包含symbol（A股代码）、timeframe（时间框架，默认1h）、history_len（历史数据长度，默认5）、indicators_to_include（要包含的指标列表，默认全部）以及各指标的可选周期参数（sma_period默认为20、rsi_period默认为14、macd_fast_period默认为12等）
 
     Returns:
-        ComprehensiveAnalysisOutput: 综合分析结果
-        - symbol: 股票代码
-        - timeframe: 时间框架
-        - report_text: 中文分析报告
-        - structured_data: 结构化指标数据
-        - error: 错误信息(如果有)
-
-    报告内容:
-    - 各技术指标的最新值
-    - 趋势方向指示
-    - 超买超卖状态
-    - 交易信号提示
-    - 指标数据统计
-
-    Example:
-        >>> inputs = ComprehensiveAnalysisInput(
-        ...     symbol="000001",
-        ...     indicators_to_include=["SMA", "RSI", "MACD"],
-        ...     history_len=5
-        ... )
-        >>> result = await generate_a_stock_comprehensive_report(ctx, inputs)
-        >>> print(result.report_text)
+        ComprehensiveAnalysisOutput: 综合分析输出对象，包含symbol、timeframe、report_text报告文本、structured_data结构化数据或error错误信息
     """
     await ctx.info(
         f"Generating A-stock comprehensive report for {inputs.symbol} with {inputs.history_len} data points."
@@ -1547,24 +1338,12 @@ async def generate_hk_stock_comprehensive_report(
     """
     生成港股综合技术分析报告
 
-    专门针对香港交易所股票的综合技术分析，考虑港股市场特点。
-
-    功能特点:
-    - 适配港股交易时间和特点
-    - 港币计价显示
-    - 港股常用技术指标
-    - 中英文股票名称支持
-
     Args:
-        与A股综合分析相同，但默认指标为["SMA", "RSI"]
+        ctx: FastMCP上下文对象
+        inputs: 综合分析输入参数，包含symbol（港股代码）、timeframe（时间框架，默认1h）、history_len（历史数据长度，默认5）、indicators_to_include（要包含的指标列表，默认全部）以及各指标的可选周期参数（sma_period默认为20、rsi_period默认为14等）
 
     Returns:
-        ComprehensiveAnalysisOutput: 港股综合分析结果
-
-    Note:
-        - 价格单位为港币(HK$)
-        - 考虑港股市场流动性特点
-        - 适用于港股通和直接港股投资
+        ComprehensiveAnalysisOutput: 综合分析输出对象，包含symbol、timeframe、report_text报告文本、structured_data结构化数据或error错误信息
     """
     await ctx.info(
         f"Generating HK stock comprehensive report for {inputs.symbol} with {inputs.history_len} data points."

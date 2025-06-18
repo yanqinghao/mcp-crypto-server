@@ -201,11 +201,11 @@ async def get_us_stock_candles(ctx: Context, inputs: CandlesInput) -> CandlesOut
     获取美股K线数据
 
     Args:
-        inputs.symbol: 股票代码 (如: AAPL, MSFT, TSLA)
-        inputs.timeframe: 时间框架 (1m, 5m, 15m, 30m, 1h, 1d, 1w, 1M)
-        inputs.limit: 数据条数限制
-        inputs.period: 时间周期 (1d, 5d, 1mo, 3mo, 6mo, 1y, 2y, 5y, 10y, ytd, max)
-        inputs.prepost: 是否包含盘前盘后数据
+        ctx: FastMCP上下文对象
+        inputs: K线数据输入参数，包含symbol（股票代码）、timeframe（时间框架）、limit（数据条数限制）、period（时间周期）、prepost（是否包含盘前盘后数据）
+
+    Returns:
+        CandlesOutput: K线数据输出对象，包含symbol、timeframe、candles列表、count和可能的error信息
     """
     await ctx.info(
         f"Fetching US stock candles for {inputs.symbol} ({inputs.timeframe.value})"
@@ -299,7 +299,11 @@ async def get_us_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
     获取美股当前价格
 
     Args:
-        inputs.symbol: 股票代码 (如: AAPL)
+        ctx: FastMCP上下文对象
+        inputs: 价格输入参数，包含symbol（股票代码）
+
+    Returns:
+        PriceOutput: 价格输出对象，包含symbol、price、timestamp和可能的error信息
     """
     await ctx.info(f"Fetching US stock current price for {inputs.symbol}")
 
@@ -368,11 +372,15 @@ async def get_us_stock_price(ctx: Context, inputs: PriceInput) -> PriceOutput:
 @mcp.tool()
 async def search_us_stock_symbols(ctx: Context, query: str, limit: int = 10) -> dict:
     """
-    搜索美股股票代码（使用更新的API）
+    搜索美股股票代码
 
     Args:
-        query: 搜索关键词 (如: apple, AAPL, microsoft)
-        limit: 结果数量限制
+        ctx: FastMCP上下文对象
+        query: 搜索关键词（如: apple, AAPL, microsoft）
+        limit: 结果数量限制，默认为10
+
+    Returns:
+        dict: 包含success状态、query查询词、market_type市场类型、results结果列表、count结果数量或error错误信息的字典
     """
     await ctx.info(f"Searching US stock symbols for '{query}'")
 
@@ -480,7 +488,11 @@ async def get_us_stock_ticker(ctx: Context, inputs: TickerInput) -> TickerOutput
     获取美股详细行情数据
 
     Args:
-        inputs.symbol: 股票代码
+        ctx: FastMCP上下文对象
+        inputs: Ticker输入参数，包含symbol（股票代码）
+
+    Returns:
+        TickerOutput: 行情数据输出对象，包含symbol、last（最新价）、open（开盘价）、high（最高价）、low（最低价）、close（收盘价）、volume（成交量）、change（涨跌）、percentage（涨跌幅）、timestamp和可能的error信息
     """
     await ctx.info(f"Fetching US stock ticker for {inputs.symbol}")
 
@@ -539,9 +551,13 @@ async def get_us_stock_financials(
     获取美股财务数据
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        statement_type: 财务报表类型 (income, balance, cashflow)
-        quarterly: 是否获取季度数据
+        statement_type: 财务报表类型（income：损益表，balance：资产负债表，cashflow：现金流量表），默认为"income"
+        quarterly: 是否获取季度数据，默认为False（年度数据）
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、statement_type报表类型、quarterly周期类型、data财务数据或error错误信息的字典
     """
     await ctx.info(f"Fetching US stock financials for {symbol}")
 
@@ -611,12 +627,16 @@ async def get_market_indices(
     interval: str = "1d",
 ) -> dict:
     """
-    获取美股市场指数数据（新增工具）
+    获取美股市场指数数据
 
     Args:
-        indices: 指数代码列表 (默认: S&P500, Dow Jones, NASDAQ)
-        period: 数据周期
-        interval: 数据间隔
+        ctx: FastMCP上下文对象
+        indices: 指数代码列表，默认为None（将使用S&P500、道琼斯、纳斯达克指数）
+        period: 数据周期，默认为"1mo"
+        interval: 数据间隔，默认为"1d"
+
+    Returns:
+        dict: 包含success状态、indices指数列表、period周期、interval间隔、data数据、count数量或error错误信息的字典
     """
     if indices is None:
         indices = ["^GSPC", "^DJI", "^IXIC"]  # S&P500, Dow Jones, NASDAQ
@@ -715,11 +735,15 @@ async def get_market_indices(
 @mcp.tool()
 async def get_dividend_history(ctx: Context, symbol: str, period: str = "5y") -> dict:
     """
-    获取股票分红历史（新增工具）
+    获取股票分红历史
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        period: 数据周期
+        period: 数据周期，默认为"5y"
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、period周期、dividends分红数据、count数量或error错误信息的字典
     """
     await ctx.info(f"Fetching dividend history for {symbol}")
 
@@ -758,21 +782,32 @@ async def calculate_us_stock_ema(
     history_len: int = 50,
 ) -> dict:
     """
-    计算美股指数移动平均线 (EMA)
+    计算美股指数移动平均线（EMA）
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        period: EMA周期
-        timeframe: 时间框架
-        history_len: 历史数据长度
+        period: EMA计算周期，默认20
+        timeframe: 时间框架，默认1d
+        history_len: 历史数据长度，默认50
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、indicator指标名称、period周期、timeframe时间框架、values指标值、latest最新值、count数量或error错误信息的字典
     """
     await ctx.info(f"Calculating EMA for {symbol}, period: {period}")
 
     try:
         required_candles = period + history_len
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(timeframe, "1d")
-        data_period = "2y" if required_candles > 252 else "1y"
+
+        # 根据时间框架调整数据周期
+        if timeframe == "15m":
+            data_period = "1d"
+        elif timeframe == "1h":
+            data_period = "1w"
+        else:
+            data_period = "2y" if required_candles > 252 else "1y"
 
         close_prices = await _fetch_single_series_data(
             ctx, symbol, data_period, interval, required_candles, "close"
@@ -821,22 +856,33 @@ async def calculate_us_stock_stochastic(
     history_len: int = 50,
 ) -> dict:
     """
-    计算美股随机指标 (Stochastic Oscillator)
+    计算美股随机指标（Stochastic Oscillator）
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        k_period: %K周期
-        d_period: %D周期
-        timeframe: 时间框架
-        history_len: 历史数据长度
+        k_period: %K计算周期，默认14
+        d_period: %D计算周期，默认3
+        timeframe: 时间框架，默认1d
+        history_len: 历史数据长度，默认50
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、indicator指标名称、k_period和d_period周期、timeframe时间框架、k_values和d_values指标值、latest_k和latest_d最新值、count数量或error错误信息的字典
     """
     await ctx.info(f"Calculating Stochastic for {symbol}")
 
     try:
         required_candles = k_period + d_period + history_len
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(timeframe, "1d")
-        data_period = "2y" if required_candles > 252 else "1y"
+
+        # 根据时间框架调整数据周期
+        if timeframe == "15m":
+            data_period = "1d"
+        elif timeframe == "1h":
+            data_period = "1w"
+        else:
+            data_period = "2y" if required_candles > 252 else "1y"
 
         price_data = await _fetch_multi_series_data(
             ctx,
@@ -903,21 +949,32 @@ async def calculate_us_stock_williams_r(
     history_len: int = 50,
 ) -> dict:
     """
-    计算美股威廉指标 (Williams %R)
+    计算美股威廉指标（Williams %R）
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        period: 计算周期
-        timeframe: 时间框架
-        history_len: 历史数据长度
+        period: 计算周期，默认14
+        timeframe: 时间框架，默认1d
+        history_len: 历史数据长度，默认50
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、indicator指标名称、period周期、timeframe时间框架、values指标值、latest最新值、count数量或error错误信息的字典
     """
     await ctx.info(f"Calculating Williams %R for {symbol}")
 
     try:
         required_candles = period + history_len
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(timeframe, "1d")
-        data_period = "2y" if required_candles > 252 else "1y"
+
+        # 根据时间框架调整数据周期
+        if timeframe == "15m":
+            data_period = "1d"
+        elif timeframe == "1h":
+            data_period = "1w"
+        else:
+            data_period = "2y" if required_candles > 252 else "1y"
 
         price_data = await _fetch_multi_series_data(
             ctx,
@@ -975,20 +1032,31 @@ async def calculate_us_stock_volume_indicators(
     history_len: int = 50,
 ) -> dict:
     """
-    计算美股成交量指标 (OBV, Volume SMA)
+    计算美股成交量指标（OBV, Volume SMA）
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        timeframe: 时间框架
-        history_len: 历史数据长度
+        timeframe: 时间框架，默认1d
+        history_len: 历史数据长度，默认50
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、timeframe时间框架、obv指标值、volume_sma成交量移动平均、latest_obv最新OBV、latest_volume_sma最新成交量SMA、current_volume当前成交量、volume_ratio成交量比率、count数量或error错误信息的字典
     """
     await ctx.info(f"Calculating volume indicators for {symbol}")
 
     try:
         required_candles = history_len + 20
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(timeframe, "1d")
-        data_period = "2y" if required_candles > 252 else "1y"
+
+        # 根据时间框架调整数据周期
+        if timeframe == "15m":
+            data_period = "1d"
+        elif timeframe == "1h":
+            data_period = "1w"
+        else:
+            data_period = "2y" if required_candles > 252 else "1y"
 
         price_data = await _fetch_multi_series_data(
             ctx, symbol, data_period, interval, required_candles, ["close", "volume"]
@@ -1060,13 +1128,17 @@ async def calculate_risk_metrics(
     benchmark_symbol: str = "^GSPC",
 ) -> dict:
     """
-    计算风险指标 (Beta, Volatility, Sharpe Ratio等)
+    计算风险指标（Beta, Volatility, Sharpe Ratio等）
 
     Args:
+        ctx: FastMCP上下文对象
         symbol: 股票代码
-        period: 计算周期
-        timeframe: 时间框架
-        benchmark_symbol: 基准指数
+        period: 计算周期，默认1y
+        timeframe: 时间框架，默认1d
+        benchmark_symbol: 基准指数，默认^GSPC（S&P500）
+
+    Returns:
+        dict: 包含success状态、symbol股票代码、benchmark基准、period周期、volatility波动率、beta贝塔系数、annual_return年化收益率、benchmark_return基准收益率、sharpe_ratio夏普比率、max_drawdown最大回撤、data_points数据点数或error错误信息的字典
     """
     await ctx.info(f"Calculating risk metrics for {symbol}")
 
@@ -1153,7 +1225,16 @@ async def calculate_risk_metrics(
 
 @mcp.tool()
 async def calculate_us_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
-    """计算美股简单移动平均线 (SMA)"""
+    """
+    计算美股简单移动平均线（SMA）
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: SMA输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为20）、history_len（历史数据长度，默认5）
+
+    Returns:
+        SmaOutput: SMA输出对象，包含symbol、timeframe、period、sma指标值或error错误信息
+    """
     await ctx.info(
         f"Calculating US stock SMA for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
     )
@@ -1167,11 +1248,16 @@ async def calculate_us_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
         required_candles = inputs.period + inputs.history_len - 1
 
         # 转换时间框架
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(inputs.timeframe, "1d")
 
-        # 根据需要的数据量选择合适的period
-        period = "2y" if required_candles > 252 else "1y"
+        # 根据时间框架调整数据周期
+        if inputs.timeframe == "15m":
+            period = "1d"
+        elif inputs.timeframe == "1h":
+            period = "1w"
+        else:
+            period = "2y" if required_candles > 252 else "1y"
 
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, period, interval, required_candles, "close"
@@ -1203,7 +1289,16 @@ async def calculate_us_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
 
 @mcp.tool()
 async def calculate_us_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
-    """计算美股相对强弱指数 (RSI)"""
+    """
+    计算美股相对强弱指数（RSI）
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: RSI输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为14）、history_len（历史数据长度，默认5）
+
+    Returns:
+        RsiOutput: RSI输出对象，包含symbol、timeframe、period、rsi指标值或error错误信息
+    """
     await ctx.info(
         f"Calculating US stock RSI for {inputs.symbol}, Period: {inputs.period}, History: {inputs.history_len}"
     )
@@ -1217,11 +1312,16 @@ async def calculate_us_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
         required_candles = inputs.period + inputs.history_len
 
         # 转换时间框架
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(inputs.timeframe, "1d")
 
-        # 根据需要的数据量选择合适的period
-        period = "2y" if required_candles > 252 else "1y"
+        # 根据时间框架调整数据周期
+        if inputs.timeframe == "15m":
+            period = "1d"
+        elif inputs.timeframe == "1h":
+            period = "1w"
+        else:
+            period = "2y" if required_candles > 252 else "1y"
 
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, period, interval, required_candles, "close"
@@ -1253,7 +1353,16 @@ async def calculate_us_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
 
 @mcp.tool()
 async def calculate_us_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
-    """计算美股MACD指标"""
+    """
+    计算美股MACD指标
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: MACD输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、fast_period（快线周期，默认为12）、slow_period（慢线周期，默认为26）、signal_period（信号线周期，默认为9）、history_len（历史数据长度，默认5）
+
+    Returns:
+        MacdOutput: MACD输出对象，包含symbol、timeframe、fast_period、slow_period、signal_period、macd主线、signal信号线、histogram柱状图或error错误信息
+    """
     await ctx.info(
         f"Calculating US stock MACD for {inputs.symbol}, Periods: {inputs.fast_period}/{inputs.slow_period}/{inputs.signal_period}"
     )
@@ -1270,11 +1379,16 @@ async def calculate_us_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput
         )
 
         # 转换时间框架
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(inputs.timeframe, "1d")
 
-        # 根据需要的数据量选择合适的period
-        period = "5y" if required_candles > 500 else "2y"
+        # 根据时间框架调整数据周期
+        if inputs.timeframe == "15m":
+            period = "1d"
+        elif inputs.timeframe == "1h":
+            period = "1w"
+        else:
+            period = "5y" if required_candles > 500 else "2y"
 
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, period, interval, required_candles, "close"
@@ -1319,7 +1433,16 @@ async def calculate_us_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput
 
 @mcp.tool()
 async def calculate_us_stock_bbands(ctx: Context, inputs: BbandsInput) -> BbandsOutput:
-    """计算美股布林带 (Bollinger Bands)"""
+    """
+    计算美股布林带（Bollinger Bands）
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: 布林带输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为20）、nbdevup（上轨标准差倍数，默认为2.0）、nbdevdn（下轨标准差倍数，默认为2.0）、matype（移动平均类型，默认为0）、history_len（历史数据长度，默认5）
+
+    Returns:
+        BbandsOutput: 布林带输出对象，包含symbol、timeframe、period、nbdevup、nbdevdn、matype、upper_band上轨、middle_band中轨、lower_band下轨或error错误信息
+    """
     await ctx.info(
         f"Calculating US stock Bollinger Bands for {inputs.symbol}, Period: {inputs.period}"
     )
@@ -1335,11 +1458,16 @@ async def calculate_us_stock_bbands(ctx: Context, inputs: BbandsInput) -> Bbands
         required_candles = inputs.period + inputs.history_len - 1
 
         # 转换时间框架
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(inputs.timeframe, "1d")
 
-        # 根据需要的数据量选择合适的period
-        period = "2y" if required_candles > 252 else "1y"
+        # 根据时间框架调整数据周期
+        if inputs.timeframe == "15m":
+            period = "1d"
+        elif inputs.timeframe == "1h":
+            period = "1w"
+        else:
+            period = "2y" if required_candles > 252 else "1y"
 
         close_prices = await _fetch_single_series_data(
             ctx, inputs.symbol, period, interval, required_candles, "close"
@@ -1390,7 +1518,16 @@ async def calculate_us_stock_bbands(ctx: Context, inputs: BbandsInput) -> Bbands
 
 @mcp.tool()
 async def calculate_us_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
-    """计算美股平均真实波幅 (ATR)"""
+    """
+    计算美股平均真实波幅（ATR）
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: ATR输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、period（计算周期，默认为14）、history_len（历史数据长度，默认5）
+
+    Returns:
+        AtrOutput: ATR输出对象，包含symbol、timeframe、period、atr指标值或error错误信息
+    """
     await ctx.info(
         f"Calculating US stock ATR for {inputs.symbol}, Period: {inputs.period}"
     )
@@ -1403,11 +1540,16 @@ async def calculate_us_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
         required_candles = inputs.period + inputs.history_len - 1
 
         # 转换时间框架
-        interval_map = {"1d": "1d", "1w": "1wk", "1M": "1mo"}
+        interval_map = {"15m": "15m", "1h": "1h", "1d": "1d", "1w": "1wk", "1M": "1mo"}
         interval = interval_map.get(inputs.timeframe, "1d")
 
-        # 根据需要的数据量选择合适的period
-        period = "2y" if required_candles > 252 else "1y"
+        # 根据时间框架调整数据周期
+        if inputs.timeframe == "15m":
+            period = "1d"
+        elif inputs.timeframe == "1h":
+            period = "1w"
+        else:
+            period = "2y" if required_candles > 252 else "1y"
 
         price_data = await _fetch_multi_series_data(
             ctx,
@@ -1462,6 +1604,13 @@ async def generate_us_stock_comprehensive_report(
 ) -> ComprehensiveAnalysisOutput:
     """
     生成美股综合技术分析报告
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: 综合分析输入参数，包含symbol（股票代码）、timeframe（时间框架，默认1h）、history_len（历史数据长度，默认5）、indicators_to_include（要包含的指标列表，默认全部）以及各指标的可选周期参数（sma_period默认为20、rsi_period默认为14、macd_fast_period默认为12等）
+
+    Returns:
+        ComprehensiveAnalysisOutput: 综合分析输出对象，包含symbol、timeframe、report_text报告文本、structured_data结构化数据或error错误信息
     """
     await ctx.info(
         f"Generating US stock comprehensive report for {inputs.symbol} with {inputs.history_len} data points."

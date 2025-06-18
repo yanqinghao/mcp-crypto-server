@@ -505,12 +505,82 @@ async def fetch_stock_symbol_mapping(ctx: Context) -> Optional[Dict[str, str]]:
         return None
 
 
+# 港股股票代码名称映射
+async def fetch_hk_stock_symbol_mapping(ctx: Context) -> Optional[Dict[str, str]]:
+    """获取港股股票代码名称映射表"""
+    if not akshare_manager.is_initialized():
+        await ctx.error("AKShare not initialized")
+        return None
+
+    try:
+        await ctx.info("Fetching HK stock symbol mapping")
+
+        # 获取港股列表数据
+        # 使用AKShare的港股股票列表接口
+        hk_df = await akshare_manager._run_in_executor(ak.stock_hk_spot_em)
+
+        if hk_df is None or hk_df.empty:
+            await ctx.warning("No HK stock list data available")
+            return None
+
+        mapping = {}
+
+        # 处理港股数据
+        for _, row in hk_df.iterrows():
+            try:
+                # 根据AKShare港股数据的实际字段名进行映射
+                # 常见的字段名可能是: 名称/简称, 代码/股票代码
+                name = row.get("名称", "")
+                code = row.get("代码", "")
+
+                if name and code:
+                    # 确保代码格式正确（港股代码通常是5位数字，前面补0）
+                    if isinstance(code, (int, float)):
+                        code = f"{int(code):05d}"
+                    elif isinstance(code, str):
+                        # 移除可能的前缀后缀，保留数字部分
+                        import re
+
+                        digits = re.findall(r"\d+", code)
+                        if digits:
+                            code = f"{int(digits[0]):05d}"
+
+                    mapping[name.strip()] = code
+
+            except (ValueError, TypeError, AttributeError) as e:
+                await ctx.warning(f"Error processing HK stock row: {e}")
+                continue
+
+        await ctx.info(f"Successfully fetched {len(mapping)} HK stock mappings")
+        return mapping
+
+    except Exception as e:
+        await ctx.error(f"Error fetching HK stock mapping: {e}")
+        return None
+
+
 # 根据名称查找代码
 async def search_stock_by_name(
     ctx: Context, company_name: str
 ) -> Optional[List[Dict[str, str]]]:
     """根据公司名称搜索股票代码"""
     mapping = await fetch_stock_symbol_mapping(ctx)
+    if not mapping:
+        return None
+
+    results = []
+    for name, code in mapping.items():
+        if company_name.lower() in name.lower():
+            results.append({"name": name, "symbol": code})
+
+    return results
+
+
+async def search_hk_stock_by_name(
+    ctx: Context, company_name: str
+) -> Optional[List[Dict[str, str]]]:
+    """根据公司名称搜索股票代码"""
+    mapping = await fetch_hk_stock_symbol_mapping(ctx)
     if not mapping:
         return None
 
