@@ -70,7 +70,7 @@ async def _fetch_single_series_data(
         # 获取美股历史数据
         stock_data = await fetch_us_stock_hist_data(ctx, symbol, period, interval)
 
-        if not stock_data or len(stock_data) < required_candles:
+        if not stock_data:
             await ctx.error(
                 f"Insufficient data for {symbol}: got {len(stock_data) if stock_data else 0}, need {required_candles}"
             )
@@ -125,7 +125,7 @@ async def _fetch_multi_series_data(
         # 获取美股历史数据
         stock_data = await fetch_us_stock_hist_data(ctx, symbol, period, interval)
 
-        if not stock_data or len(stock_data) < required_candles:
+        if not stock_data:
             await ctx.error(
                 f"Insufficient data for {symbol}: got {len(stock_data) if stock_data else 0}, need {required_candles}"
             )
@@ -154,11 +154,6 @@ async def _fetch_multi_series_data(
 
         # 确保所有序列长度一致
         min_length = min(len(series) for series in result.values())
-        if min_length < required_candles:
-            await ctx.error(
-                f"Insufficient clean data after filtering: {min_length} < {required_candles}"
-            )
-            return None
 
         # 截取到相同长度
         for key in result:
@@ -813,7 +808,7 @@ async def calculate_us_stock_ema(
             ctx, symbol, data_period, interval, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return {
                 "success": False,
                 "symbol": symbol,
@@ -1263,7 +1258,7 @@ async def calculate_us_stock_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
             ctx, inputs.symbol, period, interval, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return SmaOutput(
                 **output_base, error="Failed to fetch sufficient US stock data for SMA."
             )
@@ -1327,7 +1322,7 @@ async def calculate_us_stock_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
             ctx, inputs.symbol, period, interval, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return RsiOutput(
                 **output_base, error="Failed to fetch sufficient US stock data for RSI."
             )
@@ -1394,7 +1389,7 @@ async def calculate_us_stock_macd(ctx: Context, inputs: MacdInput) -> MacdOutput
             ctx, inputs.symbol, period, interval, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return MacdOutput(
                 **output_base,
                 error="Failed to fetch sufficient US stock data for MACD.",
@@ -1473,7 +1468,7 @@ async def calculate_us_stock_bbands(ctx: Context, inputs: BbandsInput) -> Bbands
             ctx, inputs.symbol, period, interval, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return BbandsOutput(
                 **output_base,
                 error="Failed to fetch sufficient US stock data for Bollinger Bands.",
@@ -1566,12 +1561,6 @@ async def calculate_us_stock_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
         high_prices = price_data["high"]
         low_prices = price_data["low"]
         close_prices = price_data["close"]
-
-        if len(high_prices) < required_candles:
-            return AtrOutput(
-                **output_base,
-                error=f"Insufficient HLC data points for ATR. Need at least {required_candles}.",
-            )
 
         atr_values = talib.ATR(
             high_prices, low_prices, close_prices, timeperiod=inputs.period

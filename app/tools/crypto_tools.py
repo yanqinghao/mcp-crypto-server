@@ -79,7 +79,7 @@ async def _fetch_single_series_data(
 
         ohlcv_data = await fetch_ohlcv_data(ctx, symbol, timeframe, fetch_size)
 
-        if not ohlcv_data or len(ohlcv_data) < required_candles:
+        if not ohlcv_data:
             import traceback
 
             traceback.print_exc()
@@ -146,7 +146,7 @@ async def _fetch_multi_series_data(
 
         ohlcv_data = await fetch_ohlcv_data(ctx, symbol, timeframe, fetch_size)
 
-        if not ohlcv_data or len(ohlcv_data) < required_candles:
+        if not ohlcv_data:
             await ctx.error(
                 f"Insufficient data for {symbol}: got {len(ohlcv_data) if ohlcv_data else 0}, need {required_candles}"
             )
@@ -176,11 +176,6 @@ async def _fetch_multi_series_data(
 
         # 确保所有序列长度一致
         min_length = min(len(series) for series in result.values())
-        if min_length < required_candles:
-            await ctx.error(
-                f"Insufficient clean data after filtering: {min_length} < {required_candles}"
-            )
-            return None
 
         # 截取到相同长度
         for key in result:
@@ -242,7 +237,7 @@ async def calculate_sma(ctx: Context, inputs: SmaInput) -> SmaOutput:
             ctx, inputs.symbol, inputs.timeframe, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return SmaOutput(
                 **output_base, error="Failed to fetch sufficient OHLCV data for SMA."
             )
@@ -301,7 +296,7 @@ async def calculate_rsi(ctx: Context, inputs: RsiInput) -> RsiOutput:
             ctx, inputs.symbol, inputs.timeframe, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return RsiOutput(
                 **output_base, error="Failed to fetch sufficient OHLCV data for RSI."
             )
@@ -365,7 +360,7 @@ async def calculate_macd(ctx: Context, inputs: MacdInput) -> MacdOutput:
             ctx, inputs.symbol, inputs.timeframe, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return MacdOutput(
                 **output_base, error="Failed to fetch sufficient OHLCV data for MACD."
             )
@@ -438,7 +433,7 @@ async def calculate_bbands(ctx: Context, inputs: BbandsInput) -> BbandsOutput:
             ctx, inputs.symbol, inputs.timeframe, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return BbandsOutput(
                 **output_base, error="Failed to fetch sufficient OHLCV data for BBANDS."
             )
@@ -524,13 +519,6 @@ async def calculate_atr(ctx: Context, inputs: AtrInput) -> AtrOutput:
         low_prices = price_data["low"]
         close_prices = price_data["close"]
 
-        # 确保数据长度足够
-        if len(high_prices) < required_candles:
-            return AtrOutput(
-                **output_base,
-                error=f"Insufficient HLC data points for ATR. Need at least {required_candles}.",
-            )
-
         atr_values = talib.ATR(
             high_prices, low_prices, close_prices, timeperiod=inputs.period
         )
@@ -598,12 +586,6 @@ async def calculate_adx(ctx: Context, inputs: AdxInput) -> AdxOutput:
         high_prices = price_data["high"]
         low_prices = price_data["low"]
         close_prices = price_data["close"]
-
-        if len(high_prices) < required_candles:
-            return AdxOutput(
-                **output_base,
-                error=f"Insufficient HLC data points for ADX. Need at least {required_candles}.",
-            )
 
         adx_values = talib.ADX(
             high_prices, low_prices, close_prices, timeperiod=inputs.period
@@ -679,11 +661,6 @@ async def calculate_obv(ctx: Context, inputs: ObvInput) -> ObvOutput:
 
         close_prices = price_data["close"]
         volume_data = price_data["volume"]
-
-        if len(close_prices) < required_candles or len(volume_data) < required_candles:
-            return ObvOutput(
-                **output_base, error="Insufficient close/volume data points for OBV."
-            )
 
         obv_values = talib.OBV(close_prices, volume_data)
 

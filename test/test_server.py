@@ -732,7 +732,7 @@ async def test_etf_tools(client):
             "inputs": {
                 "symbol": "510050",
                 "timeframe": "1d",
-                "history_len": 30,
+                "history_len": 1000,
                 "indicators_to_include": ["SMA", "RSI", "MACD", "BBANDS"],
                 "sma_period": 20,
                 "rsi_period": 14,
@@ -940,15 +940,15 @@ async def test_prompts_and_resources(client):
 async def main():
     """主测试函数"""
     # Connect via SSE
-    client = Client(transport="http://localhost:8000/sse")
+    client = Client(transport="http://localhost:8888/sse")
     async with client:
         try:
             # 选择要测试的模块
             test_crypto = False  # 测试加密货币工具
             test_a_stock = False  # 测试A股工具
-            test_hk_stock = True  # 测试港股工具
+            test_hk_stock = False  # 测试港股工具
             test_us_stock = False  # 测试美股工具
-            test_etf_stock = False  # 测试ETF工具
+            test_etf_stock = True  # 测试ETF工具
             test_prompts = False  # 测试提示符和资源
 
             if test_crypto:

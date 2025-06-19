@@ -201,6 +201,8 @@ async def fetch_etf_hist_data(
                 )
             elif market.upper() == "HK":
                 # 港股ETF历史数据
+                kwargs["period"] = period
+                kwargs["adjust"] = adjust
                 df = await akshare_manager._run_in_executor(ak.stock_hk_hist, **kwargs)
             elif market.upper() == "US":
                 # 美股ETF历史数据

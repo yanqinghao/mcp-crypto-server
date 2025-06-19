@@ -134,7 +134,7 @@ async def _fetch_etf_single_series_data(
             ctx, symbol, market_type, period, start_date, end_date
         )
 
-        if not etf_data or len(etf_data) < required_candles:
+        if not etf_data:
             await ctx.error(
                 f"Insufficient ETF data for {symbol}: got {len(etf_data) if etf_data else 0}, need {required_candles}"
             )
@@ -184,7 +184,7 @@ async def _fetch_etf_multi_series_data(
             ctx, symbol, market_type, period, start_date, end_date
         )
 
-        if not etf_data or len(etf_data) < required_candles:
+        if not etf_data:
             await ctx.error(
                 f"Insufficient ETF data for {symbol}: got {len(etf_data) if etf_data else 0}, need {required_candles}"
             )
@@ -211,11 +211,6 @@ async def _fetch_etf_multi_series_data(
 
         # 确保所有序列长度一致
         min_length = min(len(series) for series in result.values())
-        if min_length < required_candles:
-            await ctx.error(
-                f"Insufficient clean ETF data after filtering: {min_length} < {required_candles}"
-            )
-            return None
 
         # 截取到相同长度
         for key in result:
@@ -693,7 +688,7 @@ async def calculate_etf_sma(
             ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return SmaOutput(
                 **output_base, error="Failed to fetch sufficient ETF data for SMA."
             )
@@ -756,7 +751,7 @@ async def calculate_etf_rsi(
             ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return RsiOutput(
                 **output_base, error="Failed to fetch sufficient ETF data for RSI."
             )
@@ -818,7 +813,7 @@ async def calculate_etf_macd(
             ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return MacdOutput(
                 **output_base, error="Failed to fetch sufficient ETF data for MACD."
             )
@@ -891,7 +886,7 @@ async def calculate_etf_bbands(
             ctx, inputs.symbol, period, market_type.value, required_candles, "close"
         )
 
-        if close_prices is None or len(close_prices) < required_candles:
+        if close_prices is None:
             return BbandsOutput(
                 **output_base,
                 error="Failed to fetch sufficient ETF data for Bollinger Bands.",
@@ -985,12 +980,6 @@ async def calculate_etf_atr(
         high_prices = price_data["high"]
         low_prices = price_data["low"]
         close_prices = price_data["close"]
-
-        if len(high_prices) < required_candles:
-            return AtrOutput(
-                **output_base,
-                error=f"Insufficient ETF HLC data points for ATR. Need at least {required_candles}.",
-            )
 
         atr_values = talib.ATR(
             high_prices, low_prices, close_prices, timeperiod=inputs.period
