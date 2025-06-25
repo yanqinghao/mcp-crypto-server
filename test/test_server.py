@@ -23,6 +23,8 @@ from models.analysis import (  # noqa
     AdxInput,
     ObvInput,
     ComprehensiveAnalysisInput,
+    StockRecommendationInput,
+    RecommendationCriteria,
 )
 
 
@@ -131,16 +133,29 @@ async def test_a_stock_tools(client):
     # print("平安银行ATR:", a_atr.model_dump_json(indent=2))
 
     # A股综合分析报告
-    print("\n--- A股综合分析 ---")
-    a_report = await client.call_tool_mcp(
-        "a_hk_stock_tools_generate_a_stock_comprehensive_report",
-        {
-            "inputs": ComprehensiveAnalysisInput(
-                symbol="510050", history_len=1000, timeframe="daily"
-            )
-        },
+    # print("\n--- A股综合分析 ---")
+    # a_report = await client.call_tool_mcp(
+    #     "a_hk_stock_tools_generate_a_stock_comprehensive_report",
+    #     {
+    #         "inputs": ComprehensiveAnalysisInput(
+    #             symbol="000001", history_len=1000, timeframe="daily"
+    #         )
+    #     },
+    # )
+    # print("平安银行综合分析报告:", a_report.model_dump_json(indent=2))
+
+    # print("\n26. 生成股票推荐设定模式...")
+    # us_report = await client.call_tool_mcp(
+    #     "a_hk_stock_tools_get_stock_recommendation_presets", {}
+    # )
+    # print("生成股票推荐设定模式:", us_report.model_dump_json(indent=2))
+
+    print("\n27. 生成综合分析报告...")
+    a_stocks = await client.call_tool_mcp(
+        "a_hk_stock_tools_query_stock_recommendations_db",
+        {"preset_name": "value_stocks", "market_type": "a_stock", "limit": 10},
     )
-    print("平安银行综合分析报告:", a_report.model_dump_json(indent=2))
+    print("苹果综合分析报告:", a_stocks.model_dump_json(indent=2))
 
 
 async def test_hk_stock_tools(client):
@@ -193,6 +208,21 @@ async def test_hk_stock_tools(client):
         {"inputs": ComprehensiveAnalysisInput(symbol="01211", history_len=10)},
     )
     print("腾讯控股综合分析报告:", hk_report.model_dump_json(indent=2))
+
+    print("\n27. 港股推荐...")
+    a_stocks = await client.call_tool_mcp(
+        "a_hk_stock_tools_recommend_hk_stocks",
+        {
+            "inputs": StockRecommendationInput(
+                market_type="a_stock",
+                criteria=RecommendationCriteria(
+                    rsi_min=20, rsi_max=35, price_change_min=-10, price_change_max=2
+                ),
+                limit=10,
+            )
+        },
+    )
+    print("苹果综合分析报告:", a_stocks.model_dump_json(indent=2))
 
 
 async def test_us_stock_tools(client):
@@ -415,12 +445,12 @@ async def test_us_stock_tools(client):
     # print("\n--- 美股综合分析 ---")
 
     # # 综合分析报告
-    print("\n25. 生成综合分析报告...")
-    us_report = await client.call_tool_mcp(
-        "us_stock_tools_generate_us_stock_comprehensive_report",
-        {"inputs": {"symbol": "AAPL", "timeframe": "1d", "history_len": 10}},
-    )
-    print("苹果综合分析报告:", us_report.model_dump_json(indent=2))
+    # print("\n25. 生成综合分析报告...")
+    # us_report = await client.call_tool_mcp(
+    #     "us_stock_tools_generate_us_stock_comprehensive_report",
+    #     {"inputs": {"symbol": "AAPL", "timeframe": "1d", "history_len": 10}},
+    # )
+    # print("苹果综合分析报告:", us_report.model_dump_json(indent=2))
 
     # print("\n=== 美股工具测试完成 ===")
 
@@ -945,10 +975,10 @@ async def main():
         try:
             # 选择要测试的模块
             test_crypto = False  # 测试加密货币工具
-            test_a_stock = False  # 测试A股工具
+            test_a_stock = True  # 测试A股工具
             test_hk_stock = False  # 测试港股工具
             test_us_stock = False  # 测试美股工具
-            test_etf_stock = True  # 测试ETF工具
+            test_etf_stock = False  # 测试ETF工具
             test_prompts = False  # 测试提示符和资源
 
             if test_crypto:

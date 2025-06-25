@@ -1,6 +1,7 @@
 import numpy as np
 import talib
 import json
+import asyncio
 from typing import Dict, Optional, List, Any
 from datetime import datetime, timedelta, time
 
@@ -18,6 +19,10 @@ from models.analysis import (
     AtrOutput,
     ComprehensiveAnalysisInput,
     ComprehensiveAnalysisOutput,
+    RecommendationCriteria,
+    StockRecommendationInput,
+    StockRecommendationOutput,
+    StockScore,
 )
 from models.market_data import (
     CandlesInput,
@@ -37,6 +42,7 @@ from services.akshare_service import (
     fetch_hk_stock_data,
     search_stock_by_name,
     search_hk_stock_by_name,
+    fetch_hk_stock_symbol_mapping,
 )
 
 mcp = FastMCP()
@@ -1463,3 +1469,977 @@ async def generate_hk_stock_comprehensive_report(
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"港股综合分析报告生成错误: {str(e)}"
         )
+
+
+async def _pre_filter_a_stocks(
+    realtime_data: List[Dict[str, Any]], criteria: RecommendationCriteria
+) -> List[Dict[str, Any]]:
+    """
+    A股数据预筛选
+
+    Args:
+        realtime_data: 实时数据列表
+        criteria: 筛选条件
+
+    Returns:
+        预筛选后的数据列表
+    """
+    pre_filtered = []
+
+    for stock_data in realtime_data:
+        symbol = stock_data.get("symbol", "")
+        name = stock_data.get("name", "")
+        price = stock_data.get("price", 0)
+        change_percent = stock_data.get("pct_change", 0)
+        market_cap = stock_data.get("market_cap", 0) / 100000000  # 转换为亿
+        volume = stock_data.get("volume", 0)
+        pe_ratio = stock_data.get("pe_ratio", 0)
+        pb_ratio = stock_data.get("pb_ratio", 0)
+
+        # 基础数据有效性检查
+        if not symbol or not name or price <= 0 or volume <= 0:
+            continue
+
+        # 排除ST、退市风险等股票
+        if any(flag in name for flag in ["ST", "*ST", "退", "N ", "C "]):
+            continue
+
+        # 粗筛选条件
+        passed_pre_filter = True
+
+        # 涨跌幅粗筛选
+        if (
+            criteria.price_change_min is not None
+            and change_percent < criteria.price_change_min
+        ):
+            passed_pre_filter = False
+        if (
+            criteria.price_change_max is not None
+            and change_percent > criteria.price_change_max
+        ):
+            passed_pre_filter = False
+
+        # 市值粗筛选
+        if criteria.market_cap_min is not None and market_cap < criteria.market_cap_min:
+            passed_pre_filter = False
+        if criteria.market_cap_max is not None and market_cap > criteria.market_cap_max:
+            passed_pre_filter = False
+
+        # PE粗筛选
+        if (
+            criteria.pe_ratio_min is not None
+            and pe_ratio > 0
+            and pe_ratio < criteria.pe_ratio_min
+        ):
+            passed_pre_filter = False
+        if (
+            criteria.pe_ratio_max is not None
+            and pe_ratio > 0
+            and pe_ratio > criteria.pe_ratio_max
+        ):
+            passed_pre_filter = False
+
+        # 排除异常数据
+        if abs(change_percent) > 11:  # A股涨跌停限制
+            passed_pre_filter = False
+        if market_cap > 0 and market_cap < 10:  # 排除过小市值
+            passed_pre_filter = False
+        if pe_ratio > 300:  # 排除异常高PE
+            passed_pre_filter = False
+        if pb_ratio > 50:  # 排除异常高PB
+            passed_pre_filter = False
+
+        # 优先选择有一定流动性的股票
+        if price * volume < 1000000:  # 成交额太小的股票
+            passed_pre_filter = False
+
+        if passed_pre_filter:
+            # 添加一些质量评分用于后续排序
+            quality_score = 0
+
+            # 市值评分
+            if market_cap >= 100:
+                quality_score += 30
+            elif market_cap >= 50:
+                quality_score += 20
+            elif market_cap >= 20:
+                quality_score += 10
+
+            # 估值评分
+            if 0 < pe_ratio <= 30:
+                quality_score += 20
+            elif 30 < pe_ratio <= 50:
+                quality_score += 10
+
+            # 成交活跃度评分
+            turnover = price * volume
+            if turnover >= 50000000:  # 5000万以上成交额
+                quality_score += 20
+            elif turnover >= 10000000:  # 1000万以上成交额
+                quality_score += 10
+
+            stock_data["quality_score"] = quality_score
+            pre_filtered.append(stock_data)
+
+    return pre_filtered
+
+
+async def _select_candidate_hk_stocks(
+    hk_mapping: Dict[str, str], max_count: int = 100
+) -> List[tuple]:
+    """
+    智能选择港股候选股票
+
+    Args:
+        hk_mapping: 港股名称到代码的映射
+        max_count: 最大候选数量
+
+    Returns:
+        候选股票列表 [(name, symbol), ...]
+    """
+    candidate_stocks = []
+
+    # 优先级规则
+    for name, symbol in hk_mapping.items():
+        if not symbol or len(symbol) != 5:
+            continue
+
+        try:
+            symbol_int = int(symbol)
+            priority_score = 0
+
+            # 1. 主板蓝筹股（代码小）- 最高优先级
+            if symbol_int <= 1000:
+                priority_score += 100
+
+            # 2. 知名公司关键词
+            high_priority_keywords = [
+                "腾讯",
+                "阿里",
+                "美团",
+                "小米",
+                "比亚迪",
+                "建设银行",
+                "工商银行",
+                "中国平安",
+                "汇丰",
+                "友邦",
+                "恒生",
+                "中国移动",
+                "港交所",
+            ]
+            if any(keyword in name for keyword in high_priority_keywords):
+                priority_score += 80
+
+            # 3. 行业关键词
+            industry_keywords = [
+                "银行",
+                "保险",
+                "电信",
+                "石油",
+                "科技",
+                "地产",
+                "医药",
+                "汽车",
+            ]
+            if any(keyword in name for keyword in industry_keywords):
+                priority_score += 50
+
+            # 4. 新经济股票
+            if 3000 <= symbol_int <= 3999 or 9000 <= symbol_int <= 9999:
+                priority_score += 60
+
+            # 5. 包含"中国"、"香港"等的公司
+            if any(keyword in name for keyword in ["中国", "香港", "国际"]):
+                priority_score += 40
+
+            # 6. 避免过于小众的股票
+            avoid_keywords = ["发展", "投资", "集团", "控股", "有限"]
+            if all(keyword not in name for keyword in avoid_keywords):
+                priority_score += 20
+
+            # 7. 代码规律性加分
+            if symbol_int <= 2000:  # 早期上市的公司
+                priority_score += 30
+
+            candidate_stocks.append((name, symbol, priority_score))
+
+        except ValueError:
+            continue
+
+    # 按优先级排序
+    candidate_stocks.sort(key=lambda x: x[2], reverse=True)
+
+    # 返回前max_count个，去掉优先级分数
+    return [(name, symbol) for name, symbol, _ in candidate_stocks[:max_count]]
+
+
+async def _calculate_stock_score(
+    ctx: Context,
+    symbol: str,
+    name: str,
+    realtime_data: Dict[str, Any],
+    market_type: str = "a_stock",
+) -> Optional[StockScore]:
+    """
+    计算单只股票的综合评分
+
+    Args:
+        ctx: FastMCP上下文
+        symbol: 股票代码
+        name: 股票名称
+        realtime_data: 实时数据
+        market_type: 市场类型
+
+    Returns:
+        StockScore对象或None
+    """
+    try:
+        # 基础数据
+        current_price = realtime_data.get("price", 0)
+        change_percent = realtime_data.get("pct_change", 0)
+        volume = realtime_data.get("volume", 0)
+        market_cap = realtime_data.get("market_cap", 0) / 100000000  # 转换为亿
+        pe_ratio = realtime_data.get("pe_ratio", 0)
+        pb_ratio = realtime_data.get("pb_ratio", 0)
+
+        recommendation_reasons = []
+        technical_score = 0
+        fundamental_score = 0
+
+        # 计算技术指标
+        try:
+            # RSI计算
+            rsi_input = RsiInput(
+                symbol=symbol, timeframe="1d", period=14, history_len=1
+            )
+            if market_type == "a_stock":
+                rsi_output = await calculate_a_stock_rsi.fn(ctx, rsi_input)
+            else:
+                rsi_output = await calculate_hk_stock_rsi.fn(ctx, rsi_input)
+
+            rsi_value = None
+            if (
+                hasattr(rsi_output, "rsi")
+                and rsi_output.rsi
+                and len(rsi_output.rsi) > 0
+            ):
+                rsi_value = rsi_output.rsi[-1]
+
+                # RSI评分
+                if 30 <= rsi_value <= 70:  # 中性区域
+                    technical_score += 25
+                    recommendation_reasons.append(f"RSI处于健康区域({rsi_value:.1f})")
+                elif rsi_value < 30:  # 超卖
+                    technical_score += 35
+                    recommendation_reasons.append(f"RSI超卖，可能反弹({rsi_value:.1f})")
+                elif rsi_value > 80:  # 过度超买
+                    technical_score -= 10
+
+        except Exception as e:
+            await ctx.warning(f"计算{symbol} RSI时出错: {e}")
+            rsi_value = None
+
+        # MACD信号
+        macd_signal = None
+        try:
+            macd_input = MacdInput(symbol=symbol, timeframe="1d", history_len=2)
+            if market_type == "a_stock":
+                macd_output = await calculate_a_stock_macd.fn(ctx, macd_input)
+            else:
+                # 港股暂时跳过MACD
+                macd_output = None
+
+            if (
+                macd_output
+                and hasattr(macd_output, "macd")
+                and macd_output.macd
+                and len(macd_output.macd) >= 2
+                and hasattr(macd_output, "signal")
+                and macd_output.signal
+                and len(macd_output.signal) >= 2
+            ):
+                current_macd = macd_output.macd[-1]
+                prev_macd = macd_output.macd[-2]
+                current_signal = macd_output.signal[-1]
+                prev_signal = macd_output.signal[-2]
+
+                # 判断金叉死叉
+                if prev_macd <= prev_signal and current_macd > current_signal:
+                    macd_signal = "金叉"
+                    technical_score += 30
+                    recommendation_reasons.append("MACD出现金叉信号")
+                elif prev_macd >= prev_signal and current_macd < current_signal:
+                    macd_signal = "死叉"
+                    technical_score -= 20
+                elif current_macd > current_signal:
+                    macd_signal = "多头"
+                    technical_score += 10
+                else:
+                    macd_signal = "空头"
+
+        except Exception as e:
+            await ctx.warning(f"计算{symbol} MACD时出错: {e}")
+
+        # SMA位置
+        sma_position = None
+        try:
+            sma_input = SmaInput(
+                symbol=symbol, timeframe="1d", period=20, history_len=1
+            )
+            if market_type == "a_stock":
+                sma_output = await calculate_a_stock_sma.fn(ctx, sma_input)
+            else:
+                sma_output = await calculate_hk_stock_sma.fn(ctx, sma_input)
+            if (
+                hasattr(sma_output, "sma")
+                and sma_output.sma
+                and len(sma_output.sma) > 0
+            ):
+                sma_value = sma_output.sma[-1]
+                if current_price > sma_value:
+                    sma_position = "上方"
+                    technical_score += 15
+                    recommendation_reasons.append("价格位于20日均线上方")
+                else:
+                    sma_position = "下方"
+
+        except Exception as e:
+            await ctx.warning(f"计算{symbol} SMA时出错: {e}")
+
+        # 成交量评分
+        volume_ratio = None
+        try:
+            # 简单的成交量评估（实际中可以计算与历史平均的比值）
+            if volume > 0:
+                # 假设正常成交量，这里可以改进为与历史平均比较
+                volume_ratio = 1.0
+                if change_percent > 0 and volume > 0:  # 放量上涨
+                    technical_score += 10
+                    recommendation_reasons.append("放量上涨")
+        except Exception:
+            volume_ratio = None
+
+        # 基本面评分
+        if pe_ratio > 0:
+            if 10 <= pe_ratio <= 25:  # 合理估值
+                fundamental_score += 30
+                recommendation_reasons.append(f"估值合理(PE={pe_ratio:.1f})")
+            elif pe_ratio < 10:  # 低估值
+                fundamental_score += 40
+                recommendation_reasons.append(f"低估值(PE={pe_ratio:.1f})")
+            elif pe_ratio > 50:  # 高估值
+                fundamental_score -= 20
+
+        if pb_ratio > 0:
+            if pb_ratio < 2:  # 低PB
+                fundamental_score += 20
+                recommendation_reasons.append(f"低PB值({pb_ratio:.1f})")
+
+        # 市值评分
+        if market_cap > 0:
+            if 50 <= market_cap <= 1000:  # 中等市值
+                fundamental_score += 15
+            elif market_cap > 1000:  # 大市值
+                fundamental_score += 10
+
+        # 涨跌幅评分
+        if -3 <= change_percent <= 7:  # 适度变化
+            technical_score += 10
+        elif change_percent > 9.5:  # 涨幅过大
+            technical_score -= 20
+        elif change_percent < -8:  # 跌幅过大
+            technical_score -= 10
+
+        # 确保评分在合理范围内
+        technical_score = max(0, min(100, technical_score))
+        fundamental_score = max(0, min(100, fundamental_score))
+        overall_score = technical_score * 0.6 + fundamental_score * 0.4
+
+        return StockScore(
+            symbol=symbol,
+            name=name,
+            current_price=current_price,
+            change_percent=change_percent,
+            volume_ratio=volume_ratio,
+            rsi=rsi_value,
+            macd_signal=macd_signal,
+            sma_position=sma_position,
+            market_cap=market_cap if market_cap > 0 else None,
+            pe_ratio=pe_ratio if pe_ratio > 0 else None,
+            pb_ratio=pb_ratio if pb_ratio > 0 else None,
+            technical_score=technical_score,
+            fundamental_score=fundamental_score,
+            overall_score=overall_score,
+            recommendation_reason=recommendation_reasons or ["基础数据正常"],
+        )
+
+    except Exception as e:
+        await ctx.error(f"计算{symbol}评分时出错: {e}")
+        return None
+
+
+async def _filter_stocks_by_criteria(
+    stocks: List[StockScore], criteria: RecommendationCriteria
+) -> List[StockScore]:
+    """
+    根据筛选条件过滤股票
+
+    Args:
+        stocks: 股票评分列表
+        criteria: 筛选条件
+
+    Returns:
+        过滤后的股票列表
+    """
+    filtered_stocks = []
+
+    for stock in stocks:
+        # RSI筛选
+        if criteria.rsi_min is not None and (
+            stock.rsi is None or stock.rsi < criteria.rsi_min
+        ):
+            continue
+        if criteria.rsi_max is not None and (
+            stock.rsi is None or stock.rsi > criteria.rsi_max
+        ):
+            continue
+
+        # 涨跌幅筛选
+        if (
+            criteria.price_change_min is not None
+            and stock.change_percent < criteria.price_change_min
+        ):
+            continue
+        if (
+            criteria.price_change_max is not None
+            and stock.change_percent > criteria.price_change_max
+        ):
+            continue
+
+        # 市值筛选
+        if criteria.market_cap_min is not None and (
+            stock.market_cap is None or stock.market_cap < criteria.market_cap_min
+        ):
+            continue
+        if criteria.market_cap_max is not None and (
+            stock.market_cap is None or stock.market_cap > criteria.market_cap_max
+        ):
+            continue
+
+        # PE筛选
+        if criteria.pe_ratio_min is not None and (
+            stock.pe_ratio is None or stock.pe_ratio < criteria.pe_ratio_min
+        ):
+            continue
+        if criteria.pe_ratio_max is not None and (
+            stock.pe_ratio is None or stock.pe_ratio > criteria.pe_ratio_max
+        ):
+            continue
+
+        # 技术形态筛选
+        if criteria.require_golden_cross and stock.macd_signal != "金叉":
+            continue
+        if criteria.require_above_sma and stock.sma_position != "上方":
+            continue
+
+        filtered_stocks.append(stock)
+
+    return filtered_stocks
+
+
+async def recommend_a_stocks(
+    ctx: Context, inputs: StockRecommendationInput
+) -> StockRecommendationOutput:
+    """
+    推荐A股股票
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: 推荐输入参数，包含market_type（市场类型，默认a_stock）、criteria（筛选条件）、limit（返回数量，默认20）、timeframe（时间框架，默认1d）
+
+    Returns:
+        StockRecommendationOutput: 推荐结果，包含market_type、total_analyzed、recommendations推荐列表、criteria_used使用条件或error错误信息
+    """
+    await ctx.info(f"开始推荐A股股票，限制数量: {inputs.limit}")
+
+    try:
+        # 获取实时股票数据
+        realtime_data = await fetch_stock_realtime_data(ctx, None)  # 获取所有股票
+
+        if not realtime_data:
+            return StockRecommendationOutput(
+                market_type="a_stock",
+                total_analyzed=0,
+                recommendations=[],
+                criteria_used=inputs.criteria.model_dump(),
+                error="无法获取股票实时数据",
+            )
+
+        await ctx.info(f"获取到{len(realtime_data)}只A股数据，开始初步筛选...")
+
+        # 第一步：基于汇总数据进行粗筛选
+        pre_filtered = []
+        for stock_data in realtime_data:
+            symbol = stock_data.get("symbol", "")
+            name = stock_data.get("name", "")
+            price = stock_data.get("price", 0)
+            change_percent = stock_data.get("pct_change", 0)
+            market_cap = stock_data.get("market_cap", 0) / 100000000  # 转换为亿
+            volume = stock_data.get("volume", 0)
+            pe_ratio = stock_data.get("pe_ratio", 0)
+
+            # 基础数据有效性检查
+            if not symbol or not name or price <= 0:
+                continue
+
+            # 粗筛选条件
+            passed_pre_filter = True
+
+            # 涨跌幅粗筛选
+            if (
+                inputs.criteria.price_change_min is not None
+                and change_percent < inputs.criteria.price_change_min
+            ):
+                passed_pre_filter = False
+            if (
+                inputs.criteria.price_change_max is not None
+                and change_percent > inputs.criteria.price_change_max
+            ):
+                passed_pre_filter = False
+
+            # 市值粗筛选
+            if (
+                inputs.criteria.market_cap_min is not None
+                and market_cap < inputs.criteria.market_cap_min
+            ):
+                passed_pre_filter = False
+            if (
+                inputs.criteria.market_cap_max is not None
+                and market_cap > inputs.criteria.market_cap_max
+            ):
+                passed_pre_filter = False
+
+            # PE粗筛选
+            if (
+                inputs.criteria.pe_ratio_min is not None
+                and pe_ratio > 0
+                and pe_ratio < inputs.criteria.pe_ratio_min
+            ):
+                passed_pre_filter = False
+            if (
+                inputs.criteria.pe_ratio_max is not None
+                and pe_ratio > 0
+                and pe_ratio > inputs.criteria.pe_ratio_max
+            ):
+                passed_pre_filter = False
+
+            # 排除异常数据
+            if change_percent > 10 or change_percent < -10:  # 排除异常涨跌幅
+                passed_pre_filter = False
+            if market_cap > 0 and market_cap < 10:  # 排除过小市值
+                passed_pre_filter = False
+            if volume <= 0:  # 排除无成交量
+                passed_pre_filter = False
+
+            if passed_pre_filter:
+                pre_filtered.append(stock_data)
+
+        await ctx.info(
+            f"粗筛选完成，从{len(realtime_data)}只股票中筛选出{len(pre_filtered)}只候选股票"
+        )
+
+        # 按成交量和市值排序，优先分析活跃度高的股票
+        pre_filtered.sort(
+            key=lambda x: (x.get("volume", 0) * x.get("price", 0)), reverse=True
+        )
+
+        # 限制详细分析的数量（取前150只最活跃的股票）
+        analysis_data = pre_filtered[: min(100, len(pre_filtered))]
+
+        # 第二步：对粗筛选后的股票进行详细技术分析
+        scored_stocks = []
+        for i, stock_data in enumerate(analysis_data):
+            if i % 30 == 0:  # 每处理30只股票报告一次进度
+                await ctx.info(f"详细分析进度：{i}/{len(analysis_data)}只股票...")
+
+            symbol = stock_data.get("symbol", "")
+            name = stock_data.get("name", "")
+
+            score = await _calculate_stock_score(
+                ctx, symbol, name, stock_data, "a_stock"
+            )
+            if score and score.overall_score > 25:  # 降低门槛以获得更多候选
+                scored_stocks.append(score)
+            await asyncio.sleep(1)
+
+        await ctx.info(f"详细分析完成，筛选到{len(scored_stocks)}只高质量候选股票")
+
+        # 第三步：应用剩余的精细筛选条件
+        filtered_stocks = await _filter_stocks_by_criteria(
+            scored_stocks, inputs.criteria
+        )
+
+        await ctx.info(f"精细筛选后剩余{len(filtered_stocks)}只股票")
+
+        # 按综合评分排序
+        filtered_stocks.sort(key=lambda x: x.overall_score, reverse=True)
+
+        # 限制返回数量
+        recommendations = filtered_stocks[: inputs.limit]
+
+        await ctx.info(f"A股推荐完成，返回{len(recommendations)}只股票")
+
+        return StockRecommendationOutput(
+            market_type="a_stock",
+            total_analyzed=len(realtime_data),
+            recommendations=recommendations,
+            criteria_used=inputs.criteria.model_dump(),
+        )
+
+    except Exception as e:
+        await ctx.error(f"A股推荐过程出错: {e}")
+        return StockRecommendationOutput(
+            market_type="a_stock",
+            total_analyzed=0,
+            recommendations=[],
+            criteria_used=inputs.criteria.model_dump(),
+            error=f"推荐过程出错: {str(e)}",
+        )
+
+
+async def recommend_hk_stocks(
+    ctx: Context, inputs: StockRecommendationInput
+) -> StockRecommendationOutput:
+    """
+    推荐港股股票
+
+    Args:
+        ctx: FastMCP上下文对象
+        inputs: 推荐输入参数，包含market_type（市场类型，默认hk_stock）、criteria（筛选条件）、limit（返回数量，默认20）、timeframe（时间框架，默认1d）
+
+    Returns:
+        StockRecommendationOutput: 推荐结果，包含market_type、total_analyzed、recommendations推荐列表、criteria_used使用条件或error错误信息
+    """
+    await ctx.info(f"开始推荐港股股票，限制数量: {inputs.limit}")
+
+    try:
+        # 获取港股映射表
+        hk_mapping = await fetch_hk_stock_symbol_mapping(ctx)
+        if not hk_mapping:
+            return StockRecommendationOutput(
+                market_type="hk_stock",
+                total_analyzed=0,
+                recommendations=[],
+                criteria_used=inputs.criteria.model_dump(),
+                error="无法获取港股代码映射",
+            )
+
+        await ctx.info(f"获取到{len(hk_mapping)}只港股代码，开始动态筛选...")
+
+        # 第一步：智能选择候选股票
+        candidate_stocks = await _select_candidate_hk_stocks(hk_mapping, max_count=120)
+
+        await ctx.info(f"筛选出{len(candidate_stocks)}只候选港股，开始获取实时数据...")
+
+        # 第二步：获取候选股票的基础数据进行粗筛选
+        pre_filtered = []
+        batch_size = 20  # 分批处理，避免一次性处理太多
+
+        for i in range(
+            0, min(100, len(candidate_stocks)), batch_size
+        ):  # 最多处理100只股票
+            batch = candidate_stocks[i : i + batch_size]
+            await ctx.info(f"处理第{i // batch_size + 1}批港股数据 ({len(batch)}只)...")
+
+            for name, symbol in batch:
+                try:
+                    # 获取最近几天的数据
+                    end_date = datetime.now().strftime("%Y%m%d")
+                    start_date = (datetime.now() - timedelta(days=5)).strftime("%Y%m%d")
+
+                    stock_data_list = await fetch_hk_stock_data(
+                        ctx, symbol, "daily", start_date, end_date
+                    )
+
+                    if stock_data_list and len(stock_data_list) > 0:
+                        latest_data = stock_data_list[-1]
+
+                        # 计算涨跌幅（如果有多天数据）
+                        change_percent = latest_data.get("pct_change", 0)
+                        if change_percent == 0 and len(stock_data_list) > 1:
+                            prev_close = stock_data_list[-2]["close"]
+                            current_close = latest_data["close"]
+                            if prev_close > 0:
+                                change_percent = (
+                                    (current_close - prev_close) / prev_close
+                                ) * 100
+
+                        # 构造类似实时数据的格式
+                        mock_realtime_data = {
+                            "symbol": symbol,
+                            "name": name,
+                            "price": latest_data["close"],
+                            "pct_change": change_percent,
+                            "open": latest_data["open"],
+                            "high": latest_data["high"],
+                            "low": latest_data["low"],
+                            "volume": latest_data["volume"],
+                            "amount": latest_data.get("amount", 0),
+                            "market_cap": 0,  # 港股市值数据需要单独获取
+                            "pe_ratio": 0,
+                            "pb_ratio": 0,
+                        }
+
+                        # 基础数据有效性和粗筛选
+                        price = mock_realtime_data["price"]
+                        volume = mock_realtime_data["volume"]
+
+                        if price > 0 and volume > 0:
+                            # 涨跌幅筛选
+                            if (
+                                inputs.criteria.price_change_min is not None
+                                and change_percent < inputs.criteria.price_change_min
+                            ):
+                                continue
+                            if (
+                                inputs.criteria.price_change_max is not None
+                                and change_percent > inputs.criteria.price_change_max
+                            ):
+                                continue
+
+                            # 排除异常数据
+                            if -15 <= change_percent <= 15:  # 港股正常涨跌幅范围
+                                pre_filtered.append(mock_realtime_data)
+
+                except Exception as e:
+                    await ctx.warning(f"获取港股{symbol}数据时出错: {e}")
+                    continue
+
+        await ctx.info(f"港股粗筛选完成，筛选出{len(pre_filtered)}只候选股票")
+
+        if not pre_filtered:
+            return StockRecommendationOutput(
+                market_type="hk_stock",
+                total_analyzed=len(candidate_stocks),
+                recommendations=[],
+                criteria_used=inputs.criteria.model_dump(),
+                error="没有符合基础条件的港股数据",
+            )
+
+        # 按成交额排序（价格*成交量），优先分析活跃股票
+        pre_filtered.sort(key=lambda x: x["price"] * x["volume"], reverse=True)
+
+        # 第三步：对筛选后的股票进行详细技术分析
+        scored_stocks = []
+        analysis_limit = min(50, len(pre_filtered))  # 最多详细分析50只
+
+        for i, stock_data in enumerate(pre_filtered[:analysis_limit]):
+            await ctx.info(
+                f"详细分析港股进度：{i + 1}/{analysis_limit} - {stock_data['name']}({stock_data['symbol']})"
+            )
+
+            symbol = stock_data["symbol"]
+            name = stock_data["name"]
+
+            score = await _calculate_stock_score(
+                ctx, symbol, name, stock_data, "hk_stock"
+            )
+            if score and score.overall_score > 15:  # 港股门槛较低
+                scored_stocks.append(score)
+            await asyncio.sleep(1)
+
+        await ctx.info(f"港股详细分析完成，筛选到{len(scored_stocks)}只高质量候选股票")
+
+        # 第四步：应用剩余的精细筛选条件
+        filtered_stocks = await _filter_stocks_by_criteria(
+            scored_stocks, inputs.criteria
+        )
+
+        # 按综合评分排序
+        filtered_stocks.sort(key=lambda x: x.overall_score, reverse=True)
+
+        # 限制返回数量
+        recommendations = filtered_stocks[: inputs.limit]
+
+        await ctx.info(f"港股推荐完成，返回{len(recommendations)}只股票")
+
+        return StockRecommendationOutput(
+            market_type="hk_stock",
+            total_analyzed=len(candidate_stocks),
+            recommendations=recommendations,
+            criteria_used=inputs.criteria.model_dump(),
+        )
+
+    except Exception as e:
+        await ctx.error(f"港股推荐过程出错: {e}")
+        return StockRecommendationOutput(
+            market_type="hk_stock",
+            total_analyzed=0,
+            recommendations=[],
+            criteria_used=inputs.criteria.model_dump(),
+            error=f"推荐过程出错: {str(e)}",
+        )
+
+
+# async def get_stock_recommendation_presets(ctx: Context) -> Dict[str, Any]:
+#     """
+#     获取预设的推荐筛选条件
+
+#     Args:
+#         ctx: FastMCP上下文对象
+
+#     Returns:
+#         dict: 包含各种预设筛选条件的字典
+#     """
+#     await ctx.info("获取股票推荐预设条件")
+
+#     presets = {
+#         "value_stocks": {
+#             "name": "价值股推荐",
+#             "description": "寻找低估值、基本面良好的股票",
+#             "criteria": RecommendationCriteria(
+#                 pe_ratio_min=5,
+#                 pe_ratio_max=20,
+#                 rsi_min=30,
+#                 rsi_max=60,
+#                 market_cap_min=50,
+#             ),
+#         },
+#         "growth_stocks": {
+#             "name": "成长股推荐",
+#             "description": "寻找技术形态良好、有上涨动能的股票",
+#             "criteria": RecommendationCriteria(
+#                 rsi_min=40,
+#                 rsi_max=75,
+#                 require_above_sma=True,
+#                 price_change_min=-2,
+#                 price_change_max=8,
+#             ),
+#         },
+#         "oversold_bounce": {
+#             "name": "超卖反弹",
+#             "description": "寻找超卖后可能反弹的股票",
+#             "criteria": RecommendationCriteria(
+#                 rsi_min=20, rsi_max=35, price_change_min=-10, price_change_max=2
+#             ),
+#         },
+#         "momentum_stocks": {
+#             "name": "动量股推荐",
+#             "description": "寻找技术指标向好的强势股",
+#             "criteria": RecommendationCriteria(
+#                 require_golden_cross=True,
+#                 require_above_sma=True,
+#                 rsi_min=50,
+#                 rsi_max=80,
+#             ),
+#         },
+#         "large_cap_stable": {
+#             "name": "大盘稳健股",
+#             "description": "大市值稳健型股票",
+#             "criteria": RecommendationCriteria(
+#                 market_cap_min=500,
+#                 pe_ratio_min=8,
+#                 pe_ratio_max=25,
+#                 rsi_min=35,
+#                 rsi_max=65,
+#             ),
+#         },
+#     }
+
+#     # 转换为可序列化的格式
+#     serializable_presets = {}
+#     for key, preset in presets.items():
+#         serializable_presets[key] = {
+#             "name": preset["name"],
+#             "description": preset["description"],
+#             "criteria": preset["criteria"].model_dump(),
+#         }
+
+#     return {
+#         "success": True,
+#         "presets": serializable_presets,
+#         "total_presets": len(presets),
+#     }
+
+
+@mcp.tool()
+async def query_stock_recommendations_db(
+    ctx: Context,
+    preset_name: str = "value_stocks",
+    market_type: str = "a_stock",
+    limit: int = 10,
+) -> dict:
+    """
+    从数据库查询股票推荐结果
+
+    Args:
+        ctx: FastMCP上下文对象
+        preset_name: 策略名称 (value_stocks, growth_stocks, oversold_bounce, momentum_stocks, large_cap_stable)
+                    value_stocks - 价值股推荐, growth_stocks - 成长股推荐, oversold_bounce - 超卖反弹, momentum_stocks - 动量股推荐, large_cap_stable - 大盘稳健股
+        market_type: 市场类型 (a_stock, not support hk_stock us_stock crypto)
+        limit: 返回数量限制
+
+    Returns:
+        dict: 推荐结果
+    """
+    from utils.stock_analysis_scheduler import stock_scheduler
+
+    await ctx.info(f"查询{market_type}的{preset_name}推荐结果")
+
+    try:
+        results = stock_scheduler.db.get_recommendations(
+            preset_name, market_type, limit
+        )
+
+        if not results:
+            return {
+                "success": False,
+                "preset_name": preset_name,
+                "market_type": market_type,
+                "message": "未找到推荐数据，请先运行分析任务",
+            }
+
+        # 格式化推荐结果
+        recommendations = []
+        for rec in results:
+            formatted_rec = {
+                "symbol": rec["symbol"],
+                "name": rec["name"],
+                "current_price": rec["current_price"],
+                "change_percent": rec["change_percent"],
+                "overall_score": rec["overall_score"],
+                "technical_score": rec["technical_score"],
+                "fundamental_score": rec["fundamental_score"],
+                "rsi": rec["rsi_14"],
+                "macd_signal": rec["macd_signal_type"],
+                "sma_position": rec["sma_position"],
+                "market_cap": rec["market_cap"],
+                "pe_ratio": rec["pe_ratio"],
+                "pb_ratio": rec["pb_ratio"],
+                "recommendation_reasons": rec["recommendation_reasons"],
+                "analysis_date": rec["analysis_date"],
+            }
+            recommendations.append(formatted_rec)
+
+        result = {
+            "success": True,
+            "preset_name": preset_name,
+            "market_type": market_type,
+            "total_found": len(results),
+            "recommendations": recommendations,
+            "query_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+        await ctx.info(f"返回{len(recommendations)}个推荐结果")
+        return result
+
+    except Exception as e:
+        error_msg = f"查询推荐失败: {str(e)}"
+        await ctx.error(error_msg)
+        return {
+            "success": False,
+            "preset_name": preset_name,
+            "market_type": market_type,
+            "error": error_msg,
+        }
