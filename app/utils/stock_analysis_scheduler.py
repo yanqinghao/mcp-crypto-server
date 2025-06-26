@@ -31,7 +31,7 @@ class StockAnalysisScheduler:
         self.running = True
 
         # 设置定时任务 - 每天凌晨2点运行
-        schedule.every().day.at("02:00").do(self._run_analysis_job)
+        schedule.every().day.at("03:20").do(self._run_analysis_job)
 
         # 启动调度器线程
         self.scheduler_thread = threading.Thread(

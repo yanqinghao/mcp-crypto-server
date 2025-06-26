@@ -76,10 +76,10 @@ async def test_a_stock_tools(client):
     # print("A股搜索结果:", search_result.model_dump_json(indent=2))
 
     # # 获取A股价格
-    # a_price = await client.call_tool_mcp(
-    #     "a_hk_stock_tools_get_a_stock_price", {"inputs": PriceInput(symbol="000001")}
-    # )
-    # print("平安银行当前价格:", a_price.model_dump_json(indent=2))
+    a_price = await client.call_tool_mcp(
+        "a_hk_stock_tools_get_a_stock_price", {"inputs": PriceInput(symbol="000001")}
+    )
+    print("平安银行当前价格:", a_price.model_dump_json(indent=2))
 
     # # 获取A股K线数据
     # a_candles = await client.call_tool_mcp(
@@ -150,12 +150,12 @@ async def test_a_stock_tools(client):
     # )
     # print("生成股票推荐设定模式:", us_report.model_dump_json(indent=2))
 
-    print("\n27. 生成综合分析报告...")
-    a_stocks = await client.call_tool_mcp(
-        "a_hk_stock_tools_query_stock_recommendations_db",
-        {"preset_name": "value_stocks", "market_type": "a_stock", "limit": 10},
-    )
-    print("苹果综合分析报告:", a_stocks.model_dump_json(indent=2))
+    # print("\n27. 生成综合分析报告...")
+    # a_stocks = await client.call_tool_mcp(
+    #     "a_hk_stock_tools_query_stock_recommendations_db",
+    #     {"preset_name": "value_stocks", "market_type": "a_stock", "limit": 10},
+    # )
+    # print("苹果综合分析报告:", a_stocks.model_dump_json(indent=2))
 
 
 async def test_hk_stock_tools(client):
@@ -970,7 +970,7 @@ async def test_prompts_and_resources(client):
 async def main():
     """主测试函数"""
     # Connect via SSE
-    client = Client(transport="http://localhost:8888/sse")
+    client = Client(transport="http://localhost:8000/sse")
     async with client:
         try:
             # 选择要测试的模块

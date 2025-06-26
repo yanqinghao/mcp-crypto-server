@@ -287,7 +287,7 @@ async def run_analysis_and_save(db: SimpleStockDB, verbose: bool = True):
             price_change_max=8,
         ),
         "oversold_bounce": RecommendationCriteria(
-            rsi_min=20, rsi_max=35, price_change_min=-10, price_change_max=2
+            rsi_min=20, rsi_max=45, price_change_min=-8, price_change_max=5
         ),
         "momentum_stocks": RecommendationCriteria(
             require_golden_cross=True, require_above_sma=True, rsi_min=50, rsi_max=80
@@ -301,6 +301,7 @@ async def run_analysis_and_save(db: SimpleStockDB, verbose: bool = True):
 
     # 分析A股市场
     print("\n=== 开始分析A股市场 ===")
+    realtime_data = None
     for preset_name, criteria in presets.items():
         print(f"\n处理A股策略: {preset_name}")
 
@@ -309,7 +310,9 @@ async def run_analysis_and_save(db: SimpleStockDB, verbose: bool = True):
                 market_type="a_stock", criteria=criteria, limit=20, timeframe="1d"
             )
 
-            result = await recommend_a_stocks(ctx, input_params)
+            result, realtime_data = await recommend_a_stocks(
+                ctx, input_params, realtime_data
+            )
             time.sleep(5)
 
             if result.error:
@@ -358,6 +361,34 @@ async def run_analysis_and_save(db: SimpleStockDB, verbose: bool = True):
     #     except Exception as e:
     #         print(f"港股{preset_name}策略出错: {e}")
     #         continue
+
+    # # 创建测试数据
+    # test_stock_score = StockScore(
+    #     symbol="AAPL",
+    #     name="Apple Inc.",
+    #     current_price=185.25,
+    #     change_percent=2.34,
+    #     market_cap=2850000000000,  # 2.85万亿
+    #     pe_ratio=28.5,
+    #     pb_ratio=5.2,
+    #     rsi=65.8,
+    #     macd_signal="BUY",
+    #     sma_position="ABOVE",
+    #     volume_ratio=1.25,
+    #     technical_score=7.8,
+    #     fundamental_score=8.2,
+    #     overall_score=8.0,
+    #     recommendation_reason=["Strong technical momentum with solid fundamentals"]
+    # )
+
+    # # 调用函数生成测试数据
+    # test_data = stock_score_to_dict(
+    #     stock_score=test_stock_score,
+    #     market_type="US",
+    #     preset_name="growth_stocks",
+    #     analysis_date="2025-06-26"
+    # )
+    # all_recommendations.append(test_data)
 
     # 保存到数据库
     if all_recommendations:

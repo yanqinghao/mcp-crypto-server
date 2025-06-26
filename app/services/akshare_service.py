@@ -19,6 +19,7 @@ class AKShareManager:
     def __init__(self):
         self._initialized = False
         self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
+        self._cache = {}
 
     def initialize(self):
         """初始化AKShare配置"""
@@ -100,8 +101,19 @@ async def fetch_stock_hist_data(
             if end_date:
                 kwargs["end_date"] = end_date
 
-            # 异步调用AKShare函数
-            df = await akshare_manager._run_in_executor(ak.stock_zh_a_hist, **kwargs)
+            if start_date is None and end_date is None:
+                today = datetime.now().strftime("%Y%m%d")
+                cache_key = f"{symbol}-{period}-{adjust}-{today}"
+            else:
+                cache_key = f"{symbol}-{period}-{adjust}-{start_date}-{end_date}"
+
+            if cache_key in akshare_manager._cache:
+                df = akshare_manager._cache[cache_key]
+            else:
+                # 异步调用AKShare函数
+                df = await akshare_manager._run_in_executor(
+                    ak.stock_zh_a_hist, **kwargs
+                )
 
             if df is None or df.empty:
                 await ctx.warning(f"No data returned for {symbol}")

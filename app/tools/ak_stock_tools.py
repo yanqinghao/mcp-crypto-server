@@ -2,7 +2,7 @@ import numpy as np
 import talib
 import json
 import asyncio
-from typing import Dict, Optional, List, Any
+from typing import Dict, Optional, List, Any, Tuple
 from datetime import datetime, timedelta, time
 
 from config import settings
@@ -1949,8 +1949,10 @@ async def _filter_stocks_by_criteria(
 
 
 async def recommend_a_stocks(
-    ctx: Context, inputs: StockRecommendationInput
-) -> StockRecommendationOutput:
+    ctx: Context,
+    inputs: StockRecommendationInput,
+    realtime_data: Optional[List[dict]] = None,
+) -> Tuple[StockRecommendationOutput, List[dict]]:
     """
     推荐A股股票
 
@@ -1965,7 +1967,8 @@ async def recommend_a_stocks(
 
     try:
         # 获取实时股票数据
-        realtime_data = await fetch_stock_realtime_data(ctx, None)  # 获取所有股票
+        if not realtime_data:
+            realtime_data = await fetch_stock_realtime_data(ctx, None)  # 获取所有股票
 
         if not realtime_data:
             return StockRecommendationOutput(
@@ -1974,7 +1977,7 @@ async def recommend_a_stocks(
                 recommendations=[],
                 criteria_used=inputs.criteria.model_dump(),
                 error="无法获取股票实时数据",
-            )
+            ), []
 
         await ctx.info(f"获取到{len(realtime_data)}只A股数据，开始初步筛选...")
 
@@ -2095,7 +2098,7 @@ async def recommend_a_stocks(
             total_analyzed=len(realtime_data),
             recommendations=recommendations,
             criteria_used=inputs.criteria.model_dump(),
-        )
+        ), realtime_data
 
     except Exception as e:
         await ctx.error(f"A股推荐过程出错: {e}")
@@ -2105,7 +2108,7 @@ async def recommend_a_stocks(
             recommendations=[],
             criteria_used=inputs.criteria.model_dump(),
             error=f"推荐过程出错: {str(e)}",
-        )
+        ), []
 
 
 async def recommend_hk_stocks(
