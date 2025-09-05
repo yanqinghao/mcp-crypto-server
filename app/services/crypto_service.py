@@ -63,6 +63,7 @@ def init_default_exchanges():
                 "sandbox": settings.SANDBOX_MODE,
                 "rateLimit": 1200,
                 "enableRateLimit": True,
+                "options": {"defaultType": "future"},
             }
         }
 
@@ -124,16 +125,27 @@ async def fetch_ohlcv_data(
                 # 尝试加载市场信息
                 try:
                     await exchange.load_markets()
-                    if symbol not in exchange.symbols:
+                    if (
+                        symbol not in exchange.symbols
+                        and f"{symbol}:USDT" not in exchange.symbols
+                    ):
                         await ctx.error(f"Symbol {symbol} not found on exchange")
                         return None
                 except Exception as e:
                     await ctx.error(f"Failed to load markets: {e}")
                     return None
             # 获取OHLCV数据
-            ohlcv_data = await exchange.fetch_ohlcv(
-                symbol=symbol, timeframe=timeframe, since=since, limit=limit
-            )
+            if symbol in exchange.symbols:
+                ohlcv_data = await exchange.fetch_ohlcv(
+                    symbol=symbol, timeframe=timeframe, since=since, limit=limit
+                )
+            else:
+                ohlcv_data = await exchange.fetch_ohlcv(
+                    symbol=f"{symbol}:USDT",
+                    timeframe=timeframe,
+                    since=since,
+                    limit=limit,
+                )
 
             if not ohlcv_data:
                 await ctx.warning(f"No OHLCV data returned for {symbol}")
