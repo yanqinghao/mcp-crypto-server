@@ -13,6 +13,8 @@ from models.market_data import (  # noqa
     TickerInput,
     OrderBookInput,
     TradesInput,
+    FundingRateInput,
+    OpenInterestInput,
 )
 from models.analysis import (  # noqa
     SmaInput,
@@ -35,10 +37,20 @@ async def test_crypto_tools(client):
     # 加密货币数据获取测试
     print("\n--- 加密货币数据获取 ---")
 
-    current_price = await client.call_tool_mcp(
-        "crypto_tools_get_current_price", {"inputs": PriceInput(symbol="BTC/USDT")}
-    )
-    print("BTC当前价格:", current_price.model_dump_json(indent=2))
+    # current_price = await client.call_tool_mcp(
+    #     "crypto_tools_get_current_price", {"inputs": PriceInput(symbol="BTC/USDT")}
+    # )
+    # print("BTC当前价格:", current_price.model_dump_json(indent=2))
+
+    # current_price = await client.call_tool_mcp(
+    #     "crypto_tools_get_funding_rate", {"inputs": FundingRateInput(symbol="BTC/USDT", include_history=True, limit=24)}
+    # )
+    # print("BTC资金费率:", current_price.model_dump_json(indent=2))
+
+    # current_price = await client.call_tool_mcp(
+    #     "crypto_tools_get_open_interest", {"inputs": OpenInterestInput(symbol="BTC/USDT", timeframe="1h", limit=200)}
+    # )
+    # print("BTC合约的未平仓量:", current_price.model_dump_json(indent=2))
 
     # candles = await client.call_tool_mcp(
     #     "crypto_tools_get_candles", {"inputs": CandlesInput(symbol="BTC/USDT")}
@@ -46,20 +58,25 @@ async def test_crypto_tools(client):
     # print("BTC K线数据:", candles.model_dump_json(indent=2))
 
     # 加密货币技术分析测试
-    print("\n--- 加密货币技术分析 ---")
+    # print("\n--- 加密货币技术分析 ---")
 
-    sma = await client.call_tool_mcp(
-        "crypto_tools_calculate_sma", {"inputs": SmaInput(symbol="BTC/USDT")}
-    )
-    print("BTC SMA:", sma.model_dump_json(indent=2))
+    # sma = await client.call_tool_mcp(
+    #     "crypto_tools_calculate_sma", {"inputs": SmaInput(symbol="BTC/USDT")}
+    # )
+    # print("BTC SMA:", sma.model_dump_json(indent=2))
 
-    # 综合分析报告
-    print("\n--- 加密货币综合分析 ---")
-    market_report = await client.call_tool_mcp(
-        "crypto_tools_generate_comprehensive_market_report",
-        {"inputs": ComprehensiveAnalysisInput(symbol="BTC/USDT")},
+    obv = await client.call_tool_mcp(
+        "crypto_tools_calculate_obv", {"inputs": ObvInput(symbol="BTC/USDT")}
     )
-    print("BTC综合分析报告:", market_report.model_dump_json(indent=2))
+    print("BTC obv:", obv.model_dump_json(indent=2))
+
+    # # 综合分析报告
+    # print("\n--- 加密货币综合分析 ---")
+    # market_report = await client.call_tool_mcp(
+    #     "crypto_tools_generate_comprehensive_market_report",
+    #     {"inputs": ComprehensiveAnalysisInput(symbol="BTC/USDT")},
+    # )
+    # print("BTC综合分析报告:", market_report.model_dump_json(indent=2))
 
 
 async def test_a_stock_tools(client):
@@ -974,8 +991,8 @@ async def main():
     async with client:
         try:
             # 选择要测试的模块
-            test_crypto = False  # 测试加密货币工具
-            test_a_stock = True  # 测试A股工具
+            test_crypto = True  # 测试加密货币工具
+            test_a_stock = False  # 测试A股工具
             test_hk_stock = False  # 测试港股工具
             test_us_stock = False  # 测试美股工具
             test_etf_stock = False  # 测试ETF工具

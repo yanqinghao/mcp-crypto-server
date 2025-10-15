@@ -37,6 +37,12 @@ from models.market_data import (
     OHLCVCandle,
     OrderBookLevel,
     TradeData,
+    FundingRateInput,
+    FundingRateOutput,
+    FundingRatePoint,
+    OpenInterestInput,
+    OpenInterestOutput,
+    OpenInterestPoint,
 )
 
 # Import the refined data fetching helpers
@@ -45,6 +51,10 @@ from services.crypto_service import (
     fetch_ticker_data,
     fetch_order_book,
     fetch_trades,
+    fetch_funding_rate_data,
+    fetch_funding_rate_history_data,
+    fetch_open_interest_latest,
+    fetch_open_interest_series,
 )
 import ccxt  # For exception types
 from fastmcp import FastMCP, Context
@@ -1356,3 +1366,106 @@ async def generate_comprehensive_market_report(
         return ComprehensiveAnalysisOutput(
             **output_base, error=f"An unexpected server error occurred: {str(e)}"
         )
+
+
+# Funding Rate Tool
+@mcp.tool()
+async def get_funding_rate(ctx: Context, inputs: FundingRateInput) -> FundingRateOutput:
+    await ctx.info(
+        f"Fetching funding rate for {inputs.symbol} (history={inputs.include_history})"
+    )
+    out = FundingRateOutput(symbol=inputs.symbol)
+    try:
+        current = await fetch_funding_rate_data(ctx, inputs.symbol, None)
+        if not current:
+            out.error = "Funding rate not available"
+            return out
+
+        out.current_rate = current.get("fundingRate") or current.get("rate")
+        out.next_funding_time = current.get("nextFundingTime") or current.get(
+            "timestamp"
+        )
+        out.funding_interval = current.get("fundingInterval")
+
+        if inputs.include_history:
+            hist_raw = await fetch_funding_rate_history_data(
+                ctx, inputs.symbol, inputs.limit, inputs.since, None
+            )
+            if hist_raw:
+                out.history = [
+                    FundingRatePoint(
+                        timestamp=int(x.get("timestamp")),
+                        rate=float(x.get("fundingRate") or x.get("rate")),
+                        info=x,
+                    )
+                    for x in hist_raw
+                    if x.get("timestamp") and (x.get("fundingRate") or x.get("rate"))
+                ]
+        return out
+
+    except Exception as e:
+        await ctx.error(
+            f"Unexpected error fetching funding rate for {inputs.symbol}: {e}"
+        )
+        out.error = "Unexpected error"
+        return out
+
+
+# Open Interest Tool
+@mcp.tool()
+async def get_open_interest(
+    ctx: Context, inputs: OpenInterestInput
+) -> OpenInterestOutput:
+    await ctx.info(
+        f"Fetching open interest for {inputs.symbol} (tf={inputs.timeframe}, limit={inputs.limit})"
+    )
+    out = OpenInterestOutput(symbol=inputs.symbol)
+    try:
+        latest_raw = await fetch_open_interest_latest(ctx, inputs.symbol, None)
+        if latest_raw:
+            out.latest = OpenInterestPoint(
+                timestamp=int(latest_raw.get("timestamp") or 0),
+                open_interest=float(
+                    latest_raw.get("openInterestValue")
+                    or latest_raw.get("info").get("openInterest")
+                ),
+                currency=latest_raw.get("symbol"),
+                info=latest_raw,
+            )
+
+        series_raw = await fetch_open_interest_series(
+            ctx, inputs.symbol, inputs.timeframe, inputs.limit, inputs.since, None
+        )
+        if series_raw:
+            out.series = [
+                OpenInterestPoint(
+                    timestamp=int(x.get("timestamp")),
+                    open_interest=float(
+                        x.get("openInterestValue")
+                        or x.get("info").get("sumOpenInterestValue")
+                    ),
+                    currency=x.get("symbol"),
+                    info=x.get("info"),
+                )
+                for x in series_raw
+                if x.get("timestamp")
+                and (
+                    x.get("openInterestValue")
+                    or x.get("info").get("sumOpenInterestValue")
+                )
+            ]
+            if not out.latest and out.series:
+                out.latest = out.series[-1]
+        if not out.latest and not out.series:
+            out.error = "Open interest not available"
+        return out
+
+    except Exception as e:
+        import traceback
+
+        traceback.print_exc()
+        await ctx.error(
+            f"Unexpected error fetching open interest for {inputs.symbol}: {e}"
+        )
+        out.error = f"Unexpected error fetching open interest for {inputs.symbol}: {e}"
+        return out

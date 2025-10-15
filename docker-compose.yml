@@ -22,6 +22,53 @@ services:
     env_file:
       - .env
 
+  futures-alart-app:
+    # 构建指令：指定如何构建此服务的镜像
+    # '.' 表示使用当前目录下的 Dockerfile
+    build:
+      context: .
+      dockerfile: "./Dockerfile"
+    # (可选) 为容器指定一个易于识别的名称
+    container_name: futures-alart-instance
+    # 端口映射：将主机的端口连接到容器的端口
+    # 格式: "HOST:CONTAINER"
+    # 这里将主机的 8000 端口映射到容器的 8000 端口 (与 Dockerfile 中 EXPOSE 的端口对应)
+    # 卷挂载：用于数据持久化或开发时的代码同步
+    volumes:
+      # (可选) 开发时挂载：将本地./app 目录挂载到容器的 /app 目录
+      # 这使得本地代码更改能实时反映到容器内，无需重新构建镜像 (适合开发环境)
+      - ./app:/app
+      - ./app/data:/app/data:rw
+      # (可选) 命名卷挂载：用于持久化存储，如数据库文件、用户上传等
+      # 示例：为 [15] 中提到的 SQLite 数据库或其他需要持久化的数据创建一个命名卷
+      # - app_data:/data # 需要在文件顶层的 'volumes' 部分定义 'app_data'
+    user: "${UID:-1000}:${GID:-1000}"
+    # 环境变量：向容器内部传递配置信息或密钥
+    # environment:
+    #   # 可以直接设置值，或使用 ${VAR_NAME} 从运行环境或.env 文件读取
+    #   # 示例：传递 API 密钥或其他配置，避免硬编码 [4, 7, 11]
+    #   - API_KEY=${API_KEY}
+    #   - DATABASE_URL=postgresql://user:password@db:5432/myapp
+    #   - DEBUG=True # 示例：传递调试标志
+    # (可选).env 文件：指定一个或多个.env 文件来加载环境变量
+    # env_file:
+    #   -.env
+    # (可选) 服务依赖：定义服务启动顺序
+    # 如果此服务依赖其他服务 (如数据库 'db') 先启动，可以在这里声明
+    # 注意：depends_on 只保证依赖服务启动，不保证其内部应用已就绪
+    # depends_on:
+    #   - db
+    # (可选) 重启策略：定义容器在退出时的行为
+    # 'unless-stopped': 除非手动停止，否则容器退出时总是尝试重启
+    # 'always': 总是重启
+    # 'on-failure': 仅在非零退出码时重启
+    # 'no': 不重启 (默认)
+    restart: unless-stopped
+    command: >
+      python futures_usdtm_1h_refresh_15m_alert.py
+    env_file:
+      - .env
+
   mcp-crypto-server:
     # 构建指令：指定如何构建此服务的镜像
     # '.' 表示使用当前目录下的 Dockerfile

@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import List, Union, Optional
+from typing import List, Union, Optional, Dict, Any
 from enum import Enum
 
 
@@ -159,4 +159,49 @@ class TradesOutput(BaseModel):
     symbol: str
     trades: List[TradeData] = []
     count: int = 0
+    error: Optional[str] = None
+
+
+class FundingRateInput(BaseModel):
+    symbol: str
+    include_history: bool = True
+    limit: int = 50
+    since: Optional[int] = None  # ms timestamp
+
+
+class FundingRatePoint(BaseModel):
+    timestamp: int
+    rate: float
+    info: Optional[Dict[str, Any]] = None
+
+
+class FundingRateOutput(BaseModel):
+    symbol: str
+    current_rate: Optional[float] = None  # e.g., 0.0001 == 0.01%
+    next_funding_time: Optional[int] = None  # ms timestamp
+    funding_interval: Optional[str] = None  # e.g., '8h'
+    history: Optional[List[FundingRatePoint]] = None
+    error: Optional[str] = None
+
+
+class OpenInterestInput(BaseModel):
+    symbol: str
+    timeframe: str = (
+        "1h"  # depends on exchange support, e.g. BinFutures: 5m/15m/1h/4h/1d
+    )
+    limit: int = 100
+    since: Optional[int] = None  # ms timestamp
+
+
+class OpenInterestPoint(BaseModel):
+    timestamp: int
+    open_interest: float
+    currency: Optional[str] = None
+    info: Optional[Dict[str, Any]] = None
+
+
+class OpenInterestOutput(BaseModel):
+    symbol: str
+    latest: Optional[OpenInterestPoint] = None
+    series: Optional[List[OpenInterestPoint]] = None
     error: Optional[str] = None

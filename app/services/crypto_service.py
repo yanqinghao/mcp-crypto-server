@@ -481,3 +481,94 @@ async def search_crypto_by_name(
     except Exception as e:
         await ctx.error(f"Error searching crypto: {e}")
         return None
+
+
+async def fetch_funding_rate_data(
+    ctx,
+    symbol: str,
+    exchange_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    exchange = exchange_manager.get_exchange(exchange_name)
+    if not exchange:
+        await ctx.error(f"Exchange not available: {exchange_name or 'default'}")
+        return None
+    try:
+        if hasattr(exchange, "fetch_funding_rate"):
+            return await exchange.fetch_funding_rate(symbol)
+        if hasattr(exchange, "fetch_funding_rate_history"):
+            hist = await exchange.fetch_funding_rate_history(symbol, limit=1)
+            if hist:
+                return hist[-1]
+        return None
+    except Exception as e:
+        await ctx.error(f"fetch_funding_rate_data error: {e}")
+        return None
+
+
+async def fetch_funding_rate_history_data(
+    ctx,
+    symbol: str,
+    limit: int = 50,
+    since: Optional[int] = None,
+    exchange_name: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    exchange = exchange_manager.get_exchange(exchange_name)
+    if not exchange:
+        await ctx.error(f"Exchange not available: {exchange_name or 'default'}")
+        return None
+    try:
+        if hasattr(exchange, "fetch_funding_rate_history"):
+            return await exchange.fetch_funding_rate_history(
+                symbol, since=since, limit=limit
+            )
+        return None
+    except Exception as e:
+        await ctx.error(f"fetch_funding_rate_history_data error: {e}")
+        return None
+
+
+async def fetch_open_interest_latest(
+    ctx,
+    symbol: str,
+    exchange_name: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    exchange = exchange_manager.get_exchange(exchange_name)
+    if not exchange:
+        await ctx.error(f"Exchange not available: {exchange_name or 'default'}")
+        return None
+    try:
+        if hasattr(exchange, "fetch_open_interest"):
+            return await exchange.fetch_open_interest(symbol)
+        if hasattr(exchange, "fetch_open_interest_history"):
+            hist = await exchange.fetch_open_interest_history(
+                symbol, timeframe="1h", limit=1
+            )
+            if hist:
+                return hist[-1]
+        return None
+    except Exception as e:
+        await ctx.error(f"fetch_open_interest_latest error: {e}")
+        return None
+
+
+async def fetch_open_interest_series(
+    ctx,
+    symbol: str,
+    timeframe: str = "1h",
+    limit: int = 100,
+    since: Optional[int] = None,
+    exchange_name: Optional[str] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    exchange = exchange_manager.get_exchange(exchange_name)
+    if not exchange:
+        await ctx.error(f"Exchange not available: {exchange_name or 'default'}")
+        return None
+    try:
+        if hasattr(exchange, "fetch_open_interest_history"):
+            return await exchange.fetch_open_interest_history(
+                symbol, timeframe=timeframe, since=since, limit=limit
+            )
+        return None
+    except Exception as e:
+        await ctx.error(f"fetch_open_interest_series error: {e}")
+        return None
