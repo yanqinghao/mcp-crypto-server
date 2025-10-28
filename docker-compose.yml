@@ -37,11 +37,7 @@ services:
     volumes:
       # (可选) 开发时挂载：将本地./app 目录挂载到容器的 /app 目录
       # 这使得本地代码更改能实时反映到容器内，无需重新构建镜像 (适合开发环境)
-      - ./app:/app
-      - ./app/data:/app/data:rw
-      # (可选) 命名卷挂载：用于持久化存储，如数据库文件、用户上传等
-      # 示例：为 [15] 中提到的 SQLite 数据库或其他需要持久化的数据创建一个命名卷
-      # - app_data:/data # 需要在文件顶层的 'volumes' 部分定义 'app_data'
+      - ./scanner-app:/app/scanner-app
     user: "${UID:-1000}:${GID:-1000}"
     # 环境变量：向容器内部传递配置信息或密钥
     # environment:
@@ -65,7 +61,7 @@ services:
     # 'no': 不重启 (默认)
     restart: unless-stopped
     command: >
-      python futures_usdtm_1h_refresh_15m_alert.py
+      python -m scanner-app.loop
     env_file:
       - .env
 
