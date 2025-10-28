@@ -2,11 +2,10 @@
 """
 multi_loop.py
 单进程调度 15m+1h 与 1h+4h 两套策略：
-- 每个 15 分钟边界：跑 M15
-- 每个整点边界：同时跑 M15 和 H1，并“合并成一条消息”（分段展示）
-- 启动后立刻先跑一次 M15
+- 每个 15 分钟边界：跑 M15（单独推送）
+- 每个整点边界：同时跑 M15 和 H1，分段合并为“多条顺序消息”推送
+- 启动后立刻先跑一次（M15）
 - 风控路由：M15 标记 [L1]，H1 标记 [L2] 且小幅加权（score_boost）
-- 需要 your_package 内已有：signals_pro, universe, formatter, notifier, exchange, strategies
 """
 
 import time
@@ -17,6 +16,7 @@ from .config import (
     SLEEP_MS,
     POLL_SEC,
     PER_MESSAGE_LIMIT,
+    MESSAGE_DELAY_SEC,  # ← 新增引入：条间延迟
     TITLE_PREFIX,
     SEPARATOR_LINE,
     ONLY_PUSH_EXPLODE,
@@ -33,7 +33,7 @@ from .strategies.m15 import M15
 from .strategies.h1_with_4h import H1_4H
 from .exchange import build_exchange
 from .candidates import hourly_refresh_candidates
-from .detect_pro import detect_signal  # 若要用基础版改成 .signals
+from .detect_pro import detect_signal  # 若用基础版改为 .detect
 from .notifier import telegram_send, schedule_delete, cleanup_pending_deletes
 from .formatter import format_signal_cn
 
@@ -51,6 +51,54 @@ LEVEL_SCORE_BOOST = {
     M15.name: 0.00,  # 不加权
     H1_4H.name: 0.05,  # 1h 信号略微加权，利于排序优先
 }
+
+# —— Telegram 安全长度 —— #
+TELEGRAM_MAX_CHARS = 3900  # 预留格式标签开销，避免 4096 硬限制
+
+
+def _send_text_with_delete(text: str):
+    """统一发送 + 自动删除封装"""
+    res = telegram_send(text)
+    if res:
+        chat_id, msg_id = res
+        schedule_delete(
+            chat_id,
+            msg_id,
+            int(time.time()) + AUTO_DELETE_HOURS * 3600 + AUTO_DELETE_GRACE,
+        )
+
+
+def _send_segments_batched(segments: List[str], title_prefix: str, max_msgs: int = 3):
+    """
+    将若干段落 segments 组装为 ≤ max_msgs 条消息发送。
+    - 每条消息长度不超过 TELEGRAM_MAX_CHARS
+    - 条间延迟使用 MESSAGE_DELAY_SEC
+    - 每条消息都会自动加上 SEPARATOR_LINE 结尾
+    """
+    if not segments:
+        return
+
+    sent = 0
+    buf = f"{title_prefix}｜{ts_now()}\n"
+    for seg in segments:
+        # 尝试塞进当前消息
+        candidate = buf + seg + f"\n{SEPARATOR_LINE}\n"
+        if len(candidate) > TELEGRAM_MAX_CHARS:
+            # 先把当前缓存发掉
+            if buf.strip():
+                _send_text_with_delete(buf + f"{SEPARATOR_LINE}")
+                sent += 1
+                if sent >= max_msgs:
+                    return
+                time.sleep(max(0, MESSAGE_DELAY_SEC))
+            # 开启新消息
+            buf = f"{title_prefix}｜{ts_now()}\n" + seg + f"\n{SEPARATOR_LINE}\n"
+        else:
+            buf = candidate
+
+    # 结尾残留也要发
+    if buf.strip() and sent < max_msgs:
+        _send_text_with_delete(buf.rstrip())
 
 
 def _collect_for_strategy(
@@ -180,33 +228,12 @@ def _format_batches_for_strategy(strategy_name: str, items: List[dict]) -> List[
     return segments
 
 
-def _send_segments_as_one_message(segments: List[str]) -> None:
-    """
-    将若干段文本拼成一条消息发送（用于整点合并）。
-    """
-    if not segments:
-        return
-    text = (
-        f"{TITLE_PREFIX}｜合并批｜{ts_now()}\n"
-        + ("\n" + SEPARATOR_LINE + "\n").join(segments)
-        + f"\n{SEPARATOR_LINE}"
-    )
-    res = telegram_send(text)
-    if res:
-        chat_id, msg_id = res
-        schedule_delete(
-            chat_id,
-            msg_id,
-            int(time.time()) + AUTO_DELETE_HOURS * 3600 + AUTO_DELETE_GRACE,
-        )
-
-
 def run_fused_loop():
     """
     单进程调度：
     - 启动立即跑一次 M15
     - 每个 15m 边界：跑 M15（单独推送）
-    - 每个 1h 边界：同时跑 M15 和 H1，并“合并成一条消息”
+    - 每个 1h 边界：同时跑 M15 和 H1，按长度分段为多条消息顺序推送（最多 3 条）
     - 候选列表按策略分别维护；刷新由 4h 边界或超时触发
     """
     ex = build_exchange()
@@ -232,24 +259,17 @@ def run_fused_loop():
 
             # 候选刷新（超时或 4h 边界）
             if (
-                now_ts - last_candidates_refresh_ts >= CANDIDATE_REFRESH_SEC
+                (now_ts - last_candidates_refresh_ts) >= CANDIDATE_REFRESH_SEC
             ) or crossed_boundary(last_ts, now_ts, FRAME_SEC["4h"]):
                 m15_candidates, m15_up, m15_dn = _refresh_for(M15)
                 h1_candidates, h1_up, h1_dn = _refresh_for(H1_4H)
 
-                res = telegram_send(
+                _send_text_with_delete(
                     f"🧭 <b>候选列表已刷新</b>\n"
                     f"M15数量：<b>{len(m15_candidates)}</b>\n"
                     f"H1 数量：<b>{len(h1_candidates)}</b>\n"
                     f"周期：<b>{CANDIDATE_REFRESH_SEC // 3600} 小时</b>"
                 )
-                if res:
-                    chat_id, msg_id = res
-                    schedule_delete(
-                        chat_id,
-                        msg_id,
-                        int(time.time()) + AUTO_DELETE_HOURS * 3600 + AUTO_DELETE_GRACE,
-                    )
                 last_candidates_refresh_ts = now_ts
 
             # 边界判定
@@ -268,9 +288,8 @@ def run_fused_loop():
                 last_ts = now_ts
                 continue
 
-            # —— 整点特殊：合并推送 —— #
+            # —— 整点：多条顺序推送（最多 3 条） —— #
             if do_h1:
-                # 收集两套
                 m15_payloads = _collect_for_strategy(
                     ex, M15, m15_candidates, m15_up, m15_dn, last_alert_at
                 )
@@ -278,19 +297,19 @@ def run_fused_loop():
                     ex, H1_4H, h1_candidates, h1_up, h1_dn, last_alert_at
                 )
 
-                # 生成分段文本
-                segs = []
-                segs += _format_batches_for_strategy(M15.name, m15_payloads)
-                segs += _format_batches_for_strategy(H1_4H.name, h1_payloads)
+                m15_segs = _format_batches_for_strategy(M15.name, m15_payloads)
+                h1_segs = _format_batches_for_strategy(H1_4H.name, h1_payloads)
 
-                if segs:
-                    _send_segments_as_one_message(segs)
+                all_segs = m15_segs + h1_segs
+                if all_segs:
+                    _send_segments_batched(all_segs, TITLE_PREFIX, max_msgs=3)
+
                     # 更新冷却时间
-                    now = time.time()
+                    now_mark = time.time()
                     for p in m15_payloads:
-                        last_alert_at[(M15.name, p["symbol"], p["kind"])] = now
+                        last_alert_at[(M15.name, p["symbol"], p["kind"])] = now_mark
                     for p in h1_payloads:
-                        last_alert_at[(H1_4H.name, p["symbol"], p["kind"])] = now
+                        last_alert_at[(H1_4H.name, p["symbol"], p["kind"])] = now_mark
 
             # —— 仅 15m 边界（非整点）：单独推送 —— #
             elif do_m15:
@@ -299,24 +318,12 @@ def run_fused_loop():
                 )
                 segs = _format_batches_for_strategy(M15.name, m15_payloads)
                 if segs:
-                    # 每个 15m 批次单独发
-                    for seg in segs:
-                        res = telegram_send(
-                            f"{TITLE_PREFIX}｜{ts_now()}\n{seg}\n{SEPARATOR_LINE}"
-                        )
-                        if res:
-                            chat_id, msg_id = res
-                            schedule_delete(
-                                chat_id,
-                                msg_id,
-                                int(time.time())
-                                + AUTO_DELETE_HOURS * 3600
-                                + AUTO_DELETE_GRACE,
-                            )
+                    _send_segments_batched(segs, TITLE_PREFIX, max_msgs=3)
+
                     # 更新冷却
-                    now = time.time()
+                    now_mark = time.time()
                     for p in m15_payloads:
-                        last_alert_at[(M15.name, p["symbol"], p["kind"])] = now
+                        last_alert_at[(M15.name, p["symbol"], p["kind"])] = now_mark
 
             first_run_done = True
 

@@ -37,7 +37,7 @@ services:
     volumes:
       # (可选) 开发时挂载：将本地./app 目录挂载到容器的 /app 目录
       # 这使得本地代码更改能实时反映到容器内，无需重新构建镜像 (适合开发环境)
-      - ./scanner-app:/app/scanner-app
+      - ./crypto_scanner:/app
     user: "${UID:-1000}:${GID:-1000}"
     # 环境变量：向容器内部传递配置信息或密钥
     # environment:
@@ -61,7 +61,7 @@ services:
     # 'no': 不重启 (默认)
     restart: unless-stopped
     command: >
-      python -m scanner-app.loop
+      sh -c "cd / && python -m app.loop"
     env_file:
       - .env
 
