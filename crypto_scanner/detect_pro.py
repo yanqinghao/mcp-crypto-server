@@ -1,40 +1,55 @@
 # -*- coding: utf-8 -*-
 """
-signals_pro.py
-增强版信号检测：
-- 若基础 signals.detect_signal 命中 => 直接返回基础结果（完全不改变行为）
-- 若基础未命中 => 尝试以下“专业级”新增信号：
-  1) trend_break_up/down         趋势线突破
-  2) volume_shift_long/short     横盘放量（吸筹/出货）
-  3) ema_stack_bull/bear         EMA 多/空头排列确认
-  4) rsi_div_long/short          RSI 背离（多/空）
-  5) climax_bottom/top           量能峰值反转（底/顶）
-  6) equilibrium_break/reject    平衡区突破 / 假突破回收
+detect.py  (Fused)
+—— Base 信号 + Pro 扩展信号，统一进入 ChaseGuard 多数表决
+要点：
+- 保留原 Base 五类：explode / pullback / capitulation / ema_rebound / bb_squeeze
+- 增加 Pro 六类：trend_break_* / volume_shift_* / ema_stack_* / rsi_div_* / climax_* / equilibrium_*
+- Guard 只看“信号本身与环境”票据：不再用 RR 作为票据（用户已说明 RR 与其 TP/SL 逻辑冗余）
+- 新票据：最低量能 VolR、HTF 趋势错位、动量豁免收紧(仅当 volr>=2.2 & ADX>=18)、扁平无量、squeeze 带宽过宽
+- MODE=QUIET → 使用 HARD 档；否则 MEDIUM 档；可通过 strategy.overrides 覆盖细项
 """
 
 import time
+from typing import Dict, List, Tuple
+from collections import defaultdict
+
 import numpy as np
 import pandas as pd
 import talib as ta
 
-# 先引入你已有的“基础检测”
-from .detect import detect_signal as _base_detect_signal
-
+from .strategies import Strategy
+from .loggingx import dbg
 from .config import (
     MODE,
     TIMEFRAME_HOURLY,
-    FRAME_SEC,
     LOOKBACK_VOL,
     BREAKOUT_WINDOW,
     BASELINE_BARS,
+    ADX_MIN_TREND,
     TREND_LOOKBACK_BARS,
+    TREND_MIN_SPEARMAN,
+    TREND_MIN_NET_UP,
+    TREND_MIN_NET_DN,
+    PRICE_DN_TH,
+    NO_FOLLOW_UP_TH,
+    REQUIRE_TREND_ALIGN,
+    PB_RSI_TH,
+    PB_WR_TH,
+    PB_MIN_BOUNCE_PCT,
+    CAP_VOLR,
+    CAP_WICK_RATIO,
+    CAP_ALLOW_BOUNCE,
+    BO_REQUIRE_HHV,
     BO_WINDOW,
-    SCALE_EQ5M_USD,
+    ENABLE_PULLBACK,
+    ENABLE_CAPITULATION,
+    ENABLE_EMA_REBOUND,
+    ENABLE_BB_SQUEEZE,
     SCALE_ABS_PCT,
-    W_VOLR_NOW,
-    W_EQ_NOW_USD,
-    W_ABS_PCT,
-    W_TREND_ALIGN,
+    EXPLODE_MAX_BAR_AGE_FRAC,
+    EXPLODE_MIN_DIST_DAYEXT_PCT,
+    EXPLODE_REQUIRE_CONTRACTION,
     SAFE_MODE_ALWAYS,
     SAFE_SL_PCT,
     SAFE_TP_PCTS,
@@ -42,63 +57,35 @@ from .config import (
     SAFE_FIB_RATIO,
     PRINT_FULL_REASONS,
     MAX_REASONS_IN_MSG,
+    FRAME_SEC,
     MIN_QV5M_USD,
-    KINDS_CN,  # 用于已有的中文映射
+    KINDS_CN,
 )
 from .exchange import fetch_ohlcv_df, get_tick_size, round_to_tick
 from .ta_utils import (
     trend_scores,
     last_rsi,
+    last_willr,
     last_adx,
     last_atr_pct,
-    compute_atr,
     percent_change,
+    compute_atr,
 )
-from .candidates import resolve_params_for_symbol, SYMBOL_CLASS
 from .liquidity import get_day_stats
-
-# ==== 本模块的新增信号开关（默认启用，若你想集中管理也可搬到 config.py） ====
-ENABLE_TREND_BREAK = True
-ENABLE_VOLUME_SHIFT = True
-ENABLE_EMA_STACK = True
-ENABLE_RSI_DIVERGENCE = True
-ENABLE_CLIMAX = True
-ENABLE_EQUILIBRIUM = True
-
-# ---- 各自的轻量阈值（与策略强弱无关，仅用于是否触发）----
-TB_LOOKBACK = 10  # 趋势线回归回看
-TB_UP_BUF = 0.002  # 向上突破缓冲（0.2%）
-TB_DN_BUF = 0.002
-VS_VOLR = 2.2  # 横盘放量的量能倍数
-VS_PCT_ABS = 0.12  # 横盘时当根涨跌幅阈值（%）
-EMA_STACK_ADX = 16  # EMA 排列时的最小 ADX
-DIV_LOOKBACK = 18  # 背离对比距离
-DIV_TOL_PCT = 0.15  # 背离价格/RSI比较的宽容度
-CLIMAX_VOLR = 5.0  # 量能峰值倍数
-CLIMAX_RSI_H = 72  # 顶部 RSI
-CLIMAX_RSI_L = 28  # 底部 RSI
-EQ_WIN = 20  # 平衡区窗口
-EQ_BREAK_BUF = 0.003  # 突破缓冲 0.3%
-EQ_REJ_BODY = 0.6  # 收回时实体占比要求
-
-# ==== 本模块新增信号的中文映射（不改你的 config 也能显示中文） ====
-LOCAL_KINDS_CN = {
-    "trend_break_up": "趋势线突破 · 上破",
-    "trend_break_down": "趋势线突破 · 下破",
-    "volume_shift_long": "横盘放量 · 吸筹",
-    "volume_shift_short": "横盘放量 · 出货",
-    "ema_stack_bull": "EMA 多头排列 · 确认",
-    "ema_stack_bear": "EMA 空头排列 · 确认",
-    "rsi_div_long": "RSI 背离 · 多",
-    "rsi_div_short": "RSI 背离 · 空",
-    "climax_bottom": "量能峰值 · 见底",
-    "climax_top": "量能峰值 · 见顶",
-    "equilibrium_break": "平衡区突破",
-    "equilibrium_reject": "平衡区假突破 · 回收",
-}
+from .candidates import resolve_params_for_symbol, SYMBOL_CLASS
 
 
-# === 复用基础模块里的目标价计算 ===
+# =========================
+# 近爆发做空锁（与原版一致）
+# =========================
+LAST_EXPLODE_UP: Dict[str, int] = {}  # {symbol: ts}
+EXPLODE_LOCK_MIN = 15 * 60
+EXPLODE_LOCK_RET_PCT = 0.9
+
+
+# =========================
+# TP/SL 与入场价工具
+# =========================
 def _tps_from_entry(side: str, entry: float, tick: float):
     tps = []
     for pct in SAFE_TP_PCTS:
@@ -165,36 +152,327 @@ def tpsl_for_safe_entry(side: str, entry_safe: float, tick: float):
     return (*tps, sl)
 
 
+# =========================
+# 本地中文名（Pro 新增）
+# =========================
+LOCAL_KINDS_CN = {
+    "trend_break_up": "趋势线突破 · 上破",
+    "trend_break_down": "趋势线突破 · 下破",
+    "volume_shift_long": "横盘放量 · 吸筹",
+    "volume_shift_short": "横盘放量 · 出货",
+    "ema_stack_bull": "EMA 多头排列 · 确认",
+    "ema_stack_bear": "EMA 空头排列 · 确认",
+    "rsi_div_long": "RSI 背离 · 多",
+    "rsi_div_short": "RSI 背离 · 空",
+    "climax_bottom": "量能峰值 · 见底",
+    "climax_top": "量能峰值 · 见顶",
+    "equilibrium_break": "平衡区突破",
+    "equilibrium_reject": "平衡区假突破 · 回收",
+}
+
+
 def _kind_cn(kind: str) -> str:
     return KINDS_CN.get(kind, LOCAL_KINDS_CN.get(kind, kind))
 
 
-def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy):
-    """
-    先走基础检测；基础未命中时，再尝试新增信号。
-    返回 (ok, payload|None)
-    """
-    # 1) 先尝试基础 signals
-    try:
-        ok, payload = _base_detect_signal(
-            ex, symbol, strong_up_map, strong_dn_map, strategy
-        )
-        if ok:
-            return ok, payload
-    except Exception as e:
-        # 基础检测异常不影响扩展检测继续进行
-        print(f"[WARN] base detect_signal error on {symbol}: {e}")
+# =========================
+# Guard：分级 + 多数表决（无 RR 票据）
+# =========================
+_GUARD_STATS = defaultdict(int)
 
-    # 2) 扩展检测（以下为轻量实现，尽量少引入额外代价）
+STRICT_DEFAULTS = {
+    "NO_CHASE_DAYEXT_GAP_PCT": 1.0,  # 接近日内高/低的最小安全距离%
+    "NO_CHASE_EMA20_PREMIUM_PCT": 2.0,  # EMA20 溢价（价偏离）
+    "CLOSE_CONFIRM_FRAC": 0.60,  # 强势类需收盘确认比例
+    "MAX_BODY_FOR_LONG": 2.5,
+    "MAX_BODY_FOR_SHORT": 2.5,
+    "SKIP_LONG_NEAR_DHIGH_FOR": [
+        "explode_up",
+        "ema_rebound_long",
+        "bb_squeeze_long",
+        "pullback_long",
+        "ema_stack_bull",
+        "trend_break_up",
+        "volume_shift_long",
+    ],
+    "SKIP_SHORT_NEAR_DLOW_FOR": [
+        "explode_down",
+        "ema_rebound_short",
+        "bb_squeeze_short",
+        "pullback_short",
+        "ema_stack_bear",
+        "trend_break_down",
+        "volume_shift_short",
+    ],
+    "RSI_CAP_LONG": 68,
+    "RSI_CAP_SHORT": 32,
+}
+
+GUARD_LEVELS = {
+    "OFF": dict(
+        need_close_frac=0.0,
+        max_body=99.0,
+        gap_pct=0.0,
+        ema20_prem=99.0,
+        min_volr=0.0,
+        votes_need=99,
+    ),
+    "SOFT": dict(
+        need_close_frac=0.50,
+        max_body=3.5,
+        gap_pct=0.6,
+        ema20_prem=2.2,
+        min_volr=1.3,
+        votes_need=2,
+    ),
+    "MEDIUM": dict(
+        need_close_frac=0.60,
+        max_body=2.5,
+        gap_pct=1.0,
+        ema20_prem=2.0,
+        min_volr=1.4,
+        votes_need=2,
+    ),
+    "HARD": dict(
+        need_close_frac=0.70,
+        max_body=2.0,
+        gap_pct=1.2,
+        ema20_prem=2.0,
+        min_volr=1.6,
+        votes_need=2,
+    ),
+}
+
+# 某些信号需要更高/更低 VolR 底线（种类修正）
+# <<< PATCH: 收紧 ema_stack、放宽结构类 >>>
+MIN_VOLR_BY_KIND = {
+    # 收紧：确认类需要更扎实量能
+    "ema_stack_bull": 1.8,
+    "ema_stack_bear": 1.8,
+    # 保持原值
+    "volume_shift_long": 1.6,
+    "volume_shift_short": 1.6,
+    "bb_squeeze_long": 1.6,
+    "bb_squeeze_short": 1.6,
+    # 放宽：结构类允许稍微低些量能（以免两票秒拦）
+    "equilibrium_break": 1.3,
+    "trend_break_up": 1.4,
+    "trend_break_down": 1.4,
+}
+
+# 可选：提高部分“易泛滥信号”的票数门槛
+# —— 结构类设为 3 票；ema_stack 恢复为使用档位默认（MEDIUM/HARD 的 votes_need=2）
+# <<< PATCH: 票数门槛调整 >>>
+VOTES_NEED_BY_KIND = {
+    "volume_shift_long": 3,
+    "volume_shift_short": 3,
+    "bb_squeeze_long": 3,
+    "bb_squeeze_short": 3,
+    # 结构类：3 票
+    "equilibrium_break": 3,
+    "trend_break_up": 3,
+    "trend_break_down": 3,
+}
+
+
+def _eval_guard(
+    kind: str,
+    side: str,  # "long"/"short"
+    *,
+    elapsed: int,
+    BAR_SEC: int,
+    body_pct: float,
+    rsi: float | None,
+    ema20_val: float | None,
+    c: float,
+    day_high: float | None,
+    day_low: float | None,
+    level: str = "MEDIUM",
+    shadow: bool = False,
+    # 新增用于票据的上下文
+    volr_now: float = 1.0,
+    adx_val: float = 0.0,
+    htf_bull: bool = False,
+    htf_bear: bool = False,
+    squeeze_width: float | None = None,
+):
+    P = GUARD_LEVELS[level]
+    votes = 0
+    reasons: List[str] = []
+
+    # 1) 收盘确认（强波动/追价风险类）
+    need_close = kind in (
+        "explode_up",
+        "explode_down",
+        "ema_rebound_long",
+        "ema_rebound_short",
+        "bb_squeeze_long",
+        "bb_squeeze_short",
+        "pullback_long",
+        "pullback_short",
+        "ema_stack_bull",
+        "ema_stack_bear",
+        "trend_break_up",
+        "trend_break_down",
+        "volume_shift_long",
+        "volume_shift_short",
+    )
+    if need_close and elapsed < int(BAR_SEC * P["need_close_frac"]):
+        votes += 1
+        reasons.append(f"close<{int(P['need_close_frac'] * 100)}%")
+
+    # 2) 实体过大拒绝（避免追大阳/大阴）
+    if body_pct > P["max_body"]:
+        votes += 1
+        reasons.append(f"body>{P['max_body']}%")
+
+    # 3) 接近日内极值（不追高/不抄底）
+    if side == "long":
+        if (day_high and c > 0) and kind in STRICT_DEFAULTS["SKIP_LONG_NEAR_DHIGH_FOR"]:
+            gap = (day_high - c) / c * 100.0
+            if gap < P["gap_pct"]:
+                votes += 1
+                reasons.append(f"nearDHigh<{P['gap_pct']}%")
+    else:
+        if (day_low and c > 0) and kind in STRICT_DEFAULTS["SKIP_SHORT_NEAR_DLOW_FOR"]:
+            gap = (c - day_low) / c * 100.0
+            if gap < P["gap_pct"]:
+                votes += 1
+                reasons.append(f"nearDLow<{P['gap_pct']}%")
+
+    # 4) EMA20 溢价限制 + 动量豁免收紧
+    # <<< PATCH: 仅对 ema 依赖强的种类开放“软票”，结构类禁用软票 >>>
+    prem = None
+    if ema20_val is not None and not pd.isna(ema20_val) and ema20_val > 0:
+        prem = (c / ema20_val - 1.0) * 100.0
+        momo_exempt = volr_now >= 2.2 and adx_val >= 18.0  # 仅强动量才豁免
+
+        def _ema_soft_vote_allowed(kind_: str) -> bool:
+            # 仅对“均线依赖度高”的种类开放软票；
+            # 结构类（trend_break_*, equilibrium_*）不吃软票，避免两票秒拦
+            return (
+                kind_.startswith("ema_stack_")
+                or kind_.startswith("bb_squeeze_")
+                or kind_.startswith("ema_rebound_")
+                or kind_.startswith("volume_shift_")
+            )
+
+        if not momo_exempt:
+            # 硬阈值票（超过档位阈值）
+            if side == "long" and prem > P["ema20_prem"]:
+                votes += 1
+                reasons.append(f"ema20+{prem:.2f}%>{P['ema20_prem']}%")
+            elif side == "short" and (-prem) > P["ema20_prem"]:
+                votes += 1
+                reasons.append(f"ema20-{(-prem):.2f}%>{P['ema20_prem']}%")
+            else:
+                # 软票：仅允许在 ema 相关类生效；结构类禁用软票
+                if _ema_soft_vote_allowed(kind) and abs(prem) >= 0.4:
+                    votes += 1
+                    reasons.append(f"ema20±{abs(prem):.2f}%≤{P['ema20_prem']:.1f}%")
+        else:
+            # 动量豁免时仅记录信息，不加票
+            reasons.append(f"ema20±{abs(prem or 0):.2f}% (momo_exempt)")
+
+    # 5) 量能底线（按档位 + 种类修正）
+    min_volr_need = max(P["min_volr"], MIN_VOLR_BY_KIND.get(kind, 0.0))
+    if volr_now < min_volr_need:
+        votes += 1
+        reasons.append(f"VolR<{min_volr_need:.1f}x")
+
+    # 6) 趋势闸门错位（与 HTF 相反向）
+    if not kind.startswith("cap_") and "equilibrium_reject" not in kind:
+        if side == "long" and htf_bear:
+            votes += 1
+            reasons.append("trend-align offset")
+        if side == "short" and htf_bull:
+            votes += 1
+            reasons.append("trend-align offset")
+
+    # 7) 扁平/无量（几乎没波动且无量）
+    # 注：对结构类（trend_break / equilibrium）不施加此软票，避免两票秒拦
+    # <<< PATCH: 排除结构类 >>>
+    if "equilibrium" not in kind and "trend_break" not in kind:
+        if c > 0:
+            if volr_now < (P["min_volr"] + 0.1) and body_pct < 0.15:
+                votes += 1
+                reasons.append("flat & no volume")
+
+    # 8) squeeze 带宽过宽
+    if "bb_squeeze" in kind and (squeeze_width is not None):
+        if squeeze_width > 0.018:  # 1.8%
+            votes += 1
+            reasons.append("squeeze range too wide")
+
+    # 9) 专门收紧：EMA 多/空头确认（确认类）的质量票
+    # <<< PATCH: ema_stack 质量票（ADX/RSI） >>>
+    if kind in ("ema_stack_bull", "ema_stack_bear"):
+        # 趋势质量不够（ADX 偏低）→ 加 1 票
+        if adx_val < 20.0:
+            votes += 1
+            reasons.append("weak-trend ADX<20")
+
+        # 过热/过冷保护：多头确认不追高，空头确认不抄绝对底
+        if rsi is not None and not pd.isna(rsi):
+            if kind == "ema_stack_bull" and rsi >= 68:
+                votes += 1
+                reasons.append("RSI>68 (overheat)")
+            if kind == "ema_stack_bear" and rsi <= 32:
+                votes += 1
+                reasons.append("RSI<32 (oversold)")
+
+    # —— 汇总 —— #
+    # 针对个别信号提高票数门槛
+    need_votes = max(P["votes_need"], VOTES_NEED_BY_KIND.get(kind, P["votes_need"]))
+    block = votes >= need_votes
+    if shadow:
+        block = False
+
+    _GUARD_STATS["total_seen"] += 1
+    for r in reasons:
+        _GUARD_STATS["reason_" + r] += 1
+    if block:
+        _GUARD_STATS["blocked_" + level.lower()] += 1
+
+    return block, reasons, votes, need_votes
+
+
+# =========================
+# 主函数：detect_signal（融合 Base+Pro，统一 Guard）
+# =========================
+def detect_signal(
+    ex,
+    symbol: str,
+    strong_up_map: dict,
+    strong_dn_map: dict,
+    strategy: Strategy,
+):
+    """
+    统一检测：产生 Base+Pro 的所有候选 kind，计算 score & reasons，
+    进入 Guard 多数表决后，按优先级+评分选 1 个最佳 payload 返回。
+    """
     TIMEFRAME_FAST = strategy.timeframe_fast
-    # TIMEFRAME_HTF = strategy.timeframe_htf
     BAR_SEC = FRAME_SEC[TIMEFRAME_FAST]
 
+    # 策略可覆盖量能阈值与评分标尺
+    MIN_EQBAR = (
+        strategy.overrides.get("MIN_QV5M_USD", MIN_QV5M_USD)
+        if strategy.overrides
+        else MIN_QV5M_USD
+    )
+    W_VOLR_NOW = strategy.w_volr_now
+    W_EQ_NOW_USD = strategy.w_eq_now_usd
+    W_ABS_PCT = strategy.w_abs_pct
+    W_TREND_ALIGN = strategy.w_trend_align
+    SCALE_EQ5M_USD = strategy.scale_eq_bar_usd
+    PB_LOOKBACK_HI = strategy.pb_lookback_hi
+
+    # 数据
     df = fetch_ohlcv_df(
         ex,
         symbol,
         strategy.timeframe_fast,
-        limit=max(LOOKBACK_VOL, BREAKOUT_WINDOW, BASELINE_BARS, 220) + 8,
+        limit=max(LOOKBACK_VOL, BREAKOUT_WINDOW, BASELINE_BARS, 320) + 8,
     )
     if len(df) < (BASELINE_BARS + 6):
         return False, None
@@ -206,12 +484,12 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
 
     o = float(cur["open"])
     h = float(cur["high"])
-    low = float(cur["low"])
+    l = float(cur["low"])
     c = float(cur["close"])
     vol = float(cur["volume"])
     cur_open_ts = int(cur["ts"]) // 1000
     now_ts = int(time.time())
-    elapsed = max(1, min(BAR_SEC, now_ts - cur_open_ts))
+    elapsed = max(1, min(BAR_SEC, now_ts - cur_open_ts))  # 本bar已进行秒数
     vps_now = vol / elapsed
 
     recent_closed = df_closed.tail(BASELINE_BARS).copy()
@@ -219,73 +497,331 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
     vps_base = float(sum(vps_hist) / len(vps_hist)) if len(vps_hist) else 0.0
     if vps_base <= 0:
         vps_base = float(df_closed.iloc[-1]["volume"]) / BAR_SEC
-    volr_now = vps_now / max(1e-12, vps_base)
 
+    volr_now = vps_now / max(1e-12, vps_base)
+    eq_base_bar_usd = vps_base * BAR_SEC * c
     eq_now_bar_usd = vps_now * BAR_SEC * c
-    P = resolve_params_for_symbol(symbol)
-    MIN_EQBAR = P.get("MIN_QV5M_USD", MIN_QV5M_USD)
+
+    # 最低等效额
     if eq_now_bar_usd < MIN_EQBAR:
         return False, None
 
     # 趋势与波动
-    # tr = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
+    tr = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
     adx = last_adx(df_closed, period=14)
-    # atrp = last_atr_pct(df_closed, period=14)
+    atrp = last_atr_pct(df_closed, period=14)
+
+    trending_up = (
+        (adx >= ADX_MIN_TREND)
+        and (tr["spearman"] >= TREND_MIN_SPEARMAN)
+        and (tr["net_pct"] >= TREND_MIN_NET_UP)
+    )
+    trending_dn = (
+        (adx >= ADX_MIN_TREND)
+        and (tr["spearman"] <= -TREND_MIN_SPEARMAN)
+        and (-tr["net_pct"] >= TREND_MIN_NET_DN)
+    )
+    is_trending = trending_up or trending_dn
+
+    loose_trending_up = (tr["spearman"] >= (TREND_MIN_SPEARMAN - 0.05)) and (
+        tr["net_pct"] >= (TREND_MIN_NET_UP - 0.05)
+    )
+    loose_trending_dn = (tr["spearman"] <= -(TREND_MIN_SPEARMAN - 0.05)) and (
+        -tr["net_pct"] >= (TREND_MIN_NET_DN - 0.05)
+    )
+
     rsi = last_rsi(df_closed, period=14)
+    wr = last_willr(df_closed, period=14)
 
-    # HTF/MA 门槛
-    close_ = df_closed["close"].astype(float).values
-    ema8 = (
-        ta.EMA(close_, timeperiod=8) if len(close_) >= 8 else np.array([np.nan, np.nan])
-    )
-    ema20 = (
-        ta.EMA(close_, timeperiod=20)
-        if len(close_) >= 20
+    hhv_prev = df_closed["high"].iloc[:-1].tail(BO_WINDOW).max()
+    llv_prev = df_closed["low"].iloc[:-1].tail(BO_WINDOW).min()
+
+    # EMA 15m + 1h
+    close_15m = df_closed["close"].astype(float).values
+    ema8_15 = (
+        ta.EMA(close_15m, timeperiod=8)
+        if len(close_15m) >= 8
         else np.array([np.nan, np.nan])
     )
-    ema50 = (
-        ta.EMA(close_, timeperiod=50)
-        if len(close_) >= 50
-        else np.array([np.nan, np.nan])
-    )
+    ema20_15 = ta.EMA(close_15m, timeperiod=20)[-1] if len(close_15m) >= 20 else np.nan
+    ema50_15 = ta.EMA(close_15m, timeperiod=50)[-1] if len(close_15m) >= 50 else np.nan
 
-    # 1h/4h EMA 闸门与基础版保持一致
     try:
-        df_htf = fetch_ohlcv_df(ex, symbol, TIMEFRAME_HOURLY, limit=120)
-        close_htf = df_htf["close"].astype(float).values
-        ema20_htf = (
-            ta.EMA(close_htf, timeperiod=20)[-1] if len(close_htf) >= 20 else np.nan
+        df_1h = fetch_ohlcv_df(ex, symbol, TIMEFRAME_HOURLY, limit=120)
+        close_1h = df_1h["close"].astype(float).values
+        ema20_1h = (
+            ta.EMA(close_1h, timeperiod=20)[-1] if len(close_1h) >= 20 else np.nan
         )
-        ema50_htf = (
-            ta.EMA(close_htf, timeperiod=50)[-1] if len(close_htf) >= 50 else np.nan
+        ema50_1h = (
+            ta.EMA(close_1h, timeperiod=50)[-1] if len(close_1h) >= 50 else np.nan
         )
     except Exception:
-        ema20_htf = ema50_htf = np.nan
+        ema20_1h = ema50_1h = np.nan
 
     HTF_BULL = (
-        pd.notna(ema20[-1])
-        and pd.notna(ema50[-1])
-        and pd.notna(ema20_htf)
-        and pd.notna(ema50_htf)
-        and ema20[-1] >= ema50[-1]
-        and ema20_htf >= ema50_htf
-        and c >= ema20[-1]
-        and c >= ema20_htf
+        pd.notna(ema20_15)
+        and pd.notna(ema50_15)
+        and pd.notna(ema20_1h)
+        and pd.notna(ema50_1h)
+        and ema20_15 >= ema50_15
+        and ema20_1h >= ema50_1h
+        and c >= ema20_15
+        and c >= ema20_1h
     )
     HTF_BEAR = (
-        pd.notna(ema20[-1])
-        and pd.notna(ema50[-1])
-        and pd.notna(ema20_htf)
-        and pd.notna(ema50_htf)
-        and ema20[-1] <= ema50[-1]
-        and ema20_htf <= ema50_htf
-        and c <= ema20[-1]
-        and c <= ema20_htf
+        pd.notna(ema20_15)
+        and pd.notna(ema50_15)
+        and pd.notna(ema20_1h)
+        and pd.notna(ema50_1h)
+        and ema20_15 <= ema50_15
+        and ema20_1h <= ema50_1h
+        and c <= ema20_15
+        and c <= ema20_1h
     )
 
-    # ---- 新增信号判定 ----
+    # ===== Base: explode / pullback / cap / ema_rebound / bb_squeeze =====
     pct_now = percent_change(c, o)
 
+    Pm = resolve_params_for_symbol(symbol)
+    EXP_VOLR = Pm["EXPLODE_VOLR"]
+    UP_TH = Pm["PRICE_UP_TH"]
+    PB_HI_PCT = Pm["PB_LOOKBACK_HI_PCT"]
+    MIN_EQBAR = Pm["MIN_QV5M_USD"]  # 名称沿用
+
+    # explode
+    explode_up = (volr_now >= EXP_VOLR) and (pct_now >= UP_TH)
+    explode_down = (volr_now >= EXP_VOLR) and (
+        pct_now <= min(NO_FOLLOW_UP_TH, PRICE_DN_TH) or pct_now <= PRICE_DN_TH
+    )
+    if REQUIRE_TREND_ALIGN:
+        if explode_up and not trending_up:
+            explode_up = False
+        if explode_down and not trending_dn:
+            explode_down = False
+
+    # 结构确认
+    STRUCT_TOL_PCT = 0.001
+    STRUCT_TOL_TICKS = 2
+    tick_tmp = get_tick_size(ex, symbol)
+    struct_tol = max(c * STRUCT_TOL_PCT, STRUCT_TOL_TICKS * tick_tmp)
+    if BO_REQUIRE_HHV:
+        if explode_up:
+            explode_up = explode_up and (c >= max(hhv_prev - struct_tol, o))
+        if explode_down:
+            explode_down = explode_down and (c <= min(llv_prev + struct_tol, o))
+
+    # QUIET 下 explode 额外门槛
+    if MODE == "QUIET" and (explode_up or explode_down):
+        max_age = int(BAR_SEC * EXPLODE_MAX_BAR_AGE_FRAC)
+        if elapsed > max_age:
+            explode_up = explode_down = False
+        try:
+            _dh, _dl, _pct24, _last_price = get_day_stats(ex, symbol, tick_tmp)
+        except Exception:
+            _dh, _dl, _pct24, _last_price = None, None, None, None
+        if explode_up and (isinstance(_dh, (int, float)) and c > 0):
+            if (_dh - c) / c * 100.0 < EXPLODE_MIN_DIST_DAYEXT_PCT:
+                explode_up = False
+        if explode_down and (isinstance(_dl, (int, float)) and c > 0):
+            if (c - _dl) / c * 100.0 < EXPLODE_MIN_DIST_DAYEXT_PCT:
+                explode_down = False
+        if EXPLODE_REQUIRE_CONTRACTION and (explode_up or explode_down):
+            _u, _m, _l = ta.BBANDS(
+                close_15m, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0
+            )
+            if pd.notna(_u[-1]) and pd.notna(_l[-1]) and pd.notna(_m[-1]):
+                _width_series = (_u - _l) / np.maximum(_m, 1e-12)
+                _recent_min = float(pd.Series(_width_series[-12:]).min())
+                if not (_recent_min <= 0.015):
+                    explode_up = explode_down = False
+
+    # 自适应
+    PB_MIN_BOUNCE_PCT_dyn = max(
+        0.03, min(0.08, PB_MIN_BOUNCE_PCT * (0.7 if adx >= ADX_MIN_TREND else 0.85))
+    )
+    PB_HI_PCT_dyn = max(0.6, min(2.5, PB_HI_PCT * (0.75 if atrp <= 2.0 else 0.95)))
+    CAPV_dyn = max(2.2, CAP_VOLR * (0.85 if not is_trending else 1.0))
+    CAPW_dyn = max(0.40, min(0.75, CAP_WICK_RATIO * (0.9 if not is_trending else 1.0)))
+
+    # pullback
+    def recent_high_distance_pct(df_closed_, lookback: int, price_now: float) -> float:
+        if len(df_closed_) < lookback or price_now <= 0:
+            return 0.0
+        hhv = float(df_closed_["high"].tail(lookback).max())
+        return max(0.0, (hhv - price_now) / price_now * 100.0)
+
+    def recent_low_distance_pct(df_closed_, lookback: int, price_now: float) -> float:
+        if len(df_closed_) < lookback or price_now <= 0:
+            return 0.0
+        llv = float(df_closed_["low"].tail(lookback).min())
+        return max(0.0, (price_now - llv) / price_now * 100.0)
+
+    pullback_long = pullback_short = False
+    if ENABLE_PULLBACK:
+        if loose_trending_up and not explode_up:
+            dist_hi = recent_high_distance_pct(df_closed, PB_LOOKBACK_HI, c)
+            pullback_long = (
+                (rsi <= PB_RSI_TH or wr <= PB_WR_TH)
+                and (dist_hi >= PB_HI_PCT_dyn)
+                and (pct_now >= PB_MIN_BOUNCE_PCT_dyn)
+            )
+        if loose_trending_dn and not explode_down:
+            dist_lo = recent_low_distance_pct(df_closed, PB_LOOKBACK_HI, c)
+            pullback_short = (
+                (rsi >= (100 - PB_RSI_TH) or wr >= -100 - PB_WR_TH)
+                and (dist_lo >= PB_HI_PCT_dyn)
+                and (pct_now <= -PB_MIN_BOUNCE_PCT_dyn)
+            )
+
+    # capitulation
+    def lower_wick_ratio(o_, h_, l_, c_):
+        total = max(h_ - l_, 1e-12)
+        lower = max(min(o_, c_) - l_, 0.0)
+        return lower / total
+
+    def upper_wick_ratio(o_, h_, l_, c_):
+        total = max(h_ - l_, 1e-12)
+        upper = max(h_ - max(o_, c_), 0.0)
+        return upper / total
+
+    cap_long = cap_short = False
+    weak_trend = adx < ADX_MIN_TREND + 2
+    if ENABLE_CAPITULATION and (not is_trending or weak_trend):
+        lw = lower_wick_ratio(o, h, l, c)
+        if (
+            (volr_now >= max(2.0, CAPV_dyn * 0.95))
+            and (lw >= max(0.33, CAPW_dyn * 0.9))
+            and (((c - l) / max(h - l, 1e-12) >= 0.6) or (pct_now >= CAP_ALLOW_BOUNCE))
+        ):
+            cap_long = True
+    if ENABLE_CAPITULATION and (not is_trending or weak_trend):
+        uw = upper_wick_ratio(o, h, l, c)
+        if (
+            (volr_now >= max(2.0, CAPV_dyn * 0.95))
+            and (uw >= max(0.33, CAPW_dyn * 0.9))
+            and (((h - c) / max(h - l, 1e-12) >= 0.6) or (pct_now <= -CAP_ALLOW_BOUNCE))
+        ):
+            cap_short = True
+
+    # ema_rebound（15m）
+    ema8 = ema8_15
+    ema20_series = (
+        ta.EMA(close_15m, timeperiod=20)
+        if len(close_15m) >= 20
+        else np.array([np.nan, np.nan])
+    )
+    ema50_series = (
+        ta.EMA(close_15m, timeperiod=50)
+        if len(close_15m) >= 50
+        else np.array([np.nan, np.nan])
+    )
+
+    ema_rebound_long = ema_rebound_short = False
+    if (
+        ENABLE_EMA_REBOUND
+        and len(close_15m) >= 50
+        and pd.notna(ema8[-2])
+        and pd.notna(ema8[-1])
+        and pd.notna(ema20_series[-1])
+        and pd.notna(ema50_series[-1])
+    ):
+        up_trend_ok = ema20_series[-1] >= ema50_series[-1]
+        dn_trend_ok = ema20_series[-1] <= ema50_series[-1]
+        volr_soft = max(1.25, EXP_VOLR * 0.5)
+        cross_up = (df_closed["close"].iloc[-1] <= float(ema8[-2]) * 1.001) and (
+            c >= float(ema8[-1]) * 0.997
+        )
+        cross_down = (df_closed["close"].iloc[-1] >= float(ema8[-2]) * 0.999) and (
+            c <= float(ema8[-1]) * 1.003
+        )
+        long_momo = rsi >= 48 or wr >= -55
+        short_momo = rsi <= 52 or wr <= -45
+        ema_rebound_long = (
+            up_trend_ok and cross_up and (volr_now >= volr_soft) and long_momo
+        )
+        ema_rebound_short = (
+            dn_trend_ok and cross_down and (volr_now >= volr_soft) and short_momo
+        )
+
+    # bb_squeeze
+    bb_upper, bb_mid, bb_lower = (
+        ta.BBANDS(close_15m, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
+        if len(close_15m) >= 20
+        else (np.nan, np.nan, np.nan)
+    )
+    bb_width = (
+        (bb_upper[-1] - bb_lower[-1]) / max(1e-12, bb_mid[-1])
+        if (isinstance(bb_mid, np.ndarray) and pd.notna(bb_mid[-1]))
+        else np.nan
+    )
+    squeeze = ENABLE_BB_SQUEEZE and (pd.notna(bb_width) and bb_width <= 0.015)
+    bb_reversal_long = bb_reversal_short = False
+    if squeeze:
+        volr_bb = max(1.6, EXP_VOLR * 0.6)
+        bb_reversal_long = (
+            (c >= bb_upper[-1] * 0.998) and (volr_now >= volr_bb) and (rsi >= 48)
+        )
+        bb_reversal_short = (
+            (c <= bb_lower[-1] * 1.002) and (volr_now >= volr_bb) and (rsi <= 52)
+        )
+
+    # HTF 闸门
+    if HTF_BULL:
+        explode_down = pullback_short = ema_rebound_short = bb_reversal_short = False
+    if HTF_BEAR:
+        explode_up = pullback_long = ema_rebound_long = bb_reversal_long = False
+
+    def below(x, y, tol=0.005):
+        return (x is not None and y is not None) and (x <= y * (1 + tol))
+
+    if HTF_BULL:
+        if explode_down:
+            explode_down = (volr_now >= EXP_VOLR * 1.35) and (
+                pct_now <= min(NO_FOLLOW_UP_TH - 0.06, PRICE_DN_TH - 0.05)
+            )
+        if pullback_short:
+            pullback_short = below(c, ema20_15) and (
+                pct_now <= -max(PB_MIN_BOUNCE_PCT_dyn * 1.6, 0.25)
+            )
+        if ema_rebound_short:
+            ema8_last = float(ema8[-1]) if pd.notna(ema8[-1]) else None
+            ema8_prev = float(ema8[-2]) if pd.notna(ema8[-2]) else None
+            ema_rebound_short = below(c, ema20_15) and (
+                ema8_prev is not None
+                and ema8_last is not None
+                and c <= ema8_last * 1.003
+            )
+
+    STRUCT_TOL_PCT_HTF = 0.0015
+    struct_tol_htf = max(c * STRUCT_TOL_PCT_HTF, 2 * tick_tmp)
+
+    def broke_15m_LL(x):
+        return (llv_prev is not None) and (x <= (llv_prev + struct_tol_htf))
+
+    if pullback_short:
+        pullback_short = pullback_short and (below(c, ema20_15) or broke_15m_LL(c))
+    if ema_rebound_short:
+        ema_rebound_short = ema_rebound_short and (
+            below(c, ema20_15) or broke_15m_LL(c)
+        )
+    if bb_reversal_short:
+        bb_reversal_short = bb_reversal_short and (
+            below(c, ema20_15) or broke_15m_LL(c)
+        )
+
+    # 爆发后做空锁
+    lock_ok = True
+    last_up_ts = LAST_EXPLODE_UP.get(symbol)
+    if last_up_ts and (int(time.time()) - last_up_ts < EXPLODE_LOCK_MIN):
+        lock_ok = pct_now <= -EXPLODE_LOCK_RET_PCT
+    if not lock_ok:
+        explode_down = pullback_short = ema_rebound_short = bb_reversal_short = False
+
+    # ===== Pro: trend_break / volume_shift / ema_stack / rsi_div / climax / equilibrium =====
+    pro_kinds: List[str] = []
+    pro_reasons: List[str] = []
+
+    # poly slope
     def _poly_slope(arr):
         x = np.arange(len(arr))
         try:
@@ -293,90 +829,109 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
         except Exception:
             return 0.0
 
-    kinds = []
-    reasons = []
+    # ema arrays (for pro)
+    ema8_arr = (
+        ta.EMA(close_15m, timeperiod=8)
+        if len(close_15m) >= 8
+        else np.array([np.nan, np.nan])
+    )
+    ema20_arr = (
+        ta.EMA(close_15m, timeperiod=20)
+        if len(close_15m) >= 20
+        else np.array([np.nan, np.nan])
+    )
+    ema50_arr = (
+        ta.EMA(close_15m, timeperiod=50)
+        if len(close_15m) >= 50
+        else np.array([np.nan, np.nan])
+    )
 
     # 1) 趋势线突破
-    if ENABLE_TREND_BREAK and len(df_closed) >= TB_LOOKBACK + 2:
+    TB_LOOKBACK = 10
+    TB_UP_BUF = 0.002
+    TB_DN_BUF = 0.002
+    if len(df_closed) >= TB_LOOKBACK + 2:
         highs = df_closed["high"].tail(TB_LOOKBACK).values
         lows = df_closed["low"].tail(TB_LOOKBACK).values
         s_h = _poly_slope(highs)
         s_l = _poly_slope(lows)
         break_up = (s_h < 0) and (c >= highs[-1] * (1.0 + TB_UP_BUF))
-        break_down = (s_l > 0) and (c <= lows[-1] * (1.0 - TB_DN_BUF))
+        break_dn = (s_l > 0) and (c <= lows[-1] * (1.0 - TB_DN_BUF))
         if HTF_BULL:
-            break_down = False
+            break_dn = False
         if HTF_BEAR:
             break_up = False
         if break_up:
-            kinds.append("trend_break_up")
-            reasons.append(f"trend_break_up: slope(H)<0 & c≥H_last*(1+{TB_UP_BUF:.3f})")
-        if break_down:
-            kinds.append("trend_break_down")
-            reasons.append(
+            pro_kinds.append("trend_break_up")
+            pro_reasons.append(
+                f"trend_break_up: slope(H)<0 & c≥H_last*(1+{TB_UP_BUF:.3f})"
+            )
+        if break_dn:
+            pro_kinds.append("trend_break_down")
+            pro_reasons.append(
                 f"trend_break_down: slope(L)>0 & c≤L_last*(1-{TB_DN_BUF:.3f})"
             )
 
-    # 2) 横盘放量（吸筹/出货）
-    if ENABLE_VOLUME_SHIFT:
-        # 横盘定义：当根振幅小且 pct_now 很小，但量能放大
-        body = abs(c - o) / max(o, 1e-12) * 100.0
-        rng = (h - low) / max(o, 1e-12) * 100.0
-        flat = (body <= VS_PCT_ABS) and (rng <= max(VS_PCT_ABS * 2.2, 0.35))
-        if flat and volr_now >= VS_VOLR:
-            # 方向用 RSI/EMA20 简单区分
-            if rsi >= 52 or (pd.notna(ema20[-1]) and c >= float(ema20[-1])):
-                if HTF_BEAR:
-                    pass
-                else:
-                    kinds.append("volume_shift_long")
-                    reasons.append(
-                        f"volume_shift_long: flat({body:.2f}%/{rng:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
-                    )
-            elif rsi <= 48 or (pd.notna(ema20[-1]) and c <= float(ema20[-1])):
-                if HTF_BULL:
-                    pass
-                else:
-                    kinds.append("volume_shift_short")
-                    reasons.append(
-                        f"volume_shift_short: flat({body:.2f}%/{rng:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
-                    )
+    # 2) 横盘放量
+    VS_VOLR = 2.2
+    VS_PCT_ABS = 0.12
+    body_pct_now = abs(c - o) / max(o, 1e-12) * 100.0
+    rng_pct_now = (h - l) / max(o, 1e-12) * 100.0
+    flat = (body_pct_now <= VS_PCT_ABS) and (rng_pct_now <= max(VS_PCT_ABS * 2.2, 0.35))
+    if flat and volr_now >= VS_VOLR:
+        if rsi >= 52 or (pd.notna(ema20_15) and c >= float(ema20_15)):
+            if not HTF_BEAR:
+                pro_kinds.append("volume_shift_long")
+                pro_reasons.append(
+                    f"volume_shift_long: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
+                )
+        elif rsi <= 48 or (pd.notna(ema20_15) and c <= float(ema20_15)):
+            if not HTF_BULL:
+                pro_kinds.append("volume_shift_short")
+                pro_reasons.append(
+                    f"volume_shift_short: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
+                )
 
-    # 3) EMA 多/空头排列确认
+    # 3) EMA 多/空头排列
+    EMA_STACK_ADX = 16
     if (
-        ENABLE_EMA_STACK
-        and len(close_) >= 50
-        and pd.notna(ema8[-1])
-        and pd.notna(ema20[-1])
-        and pd.notna(ema50[-1])
+        len(close_15m) >= 50
+        and isinstance(ema8_arr, np.ndarray)
+        and pd.notna(ema8_arr[-1])
+        and isinstance(ema20_arr, np.ndarray)
+        and pd.notna(ema20_arr[-1])
+        and isinstance(ema50_arr, np.ndarray)
+        and pd.notna(ema50_arr[-1])
     ):
         stack_bull = (
-            (ema8[-1] >= ema20[-1] >= ema50[-1])
+            (ema8_arr[-1] >= ema20_arr[-1] >= ema50_arr[-1])
             and (adx >= EMA_STACK_ADX)
-            and (c >= ema20[-1])
+            and (c >= ema20_arr[-1])
         )
         stack_bear = (
-            (ema8[-1] <= ema20[-1] <= ema50[-1])
+            (ema8_arr[-1] <= ema20_arr[-1] <= ema50_arr[-1])
             and (adx >= EMA_STACK_ADX)
-            and (c <= ema20[-1])
+            and (c <= ema20_arr[-1])
         )
         if HTF_BULL:
             stack_bear = False
         if HTF_BEAR:
             stack_bull = False
         if stack_bull:
-            kinds.append("ema_stack_bull")
-            reasons.append(
+            pro_kinds.append("ema_stack_bull")
+            pro_reasons.append(
                 f"ema_stack_bull: EMA8≥20≥50 & ADX {adx:.1f}≥{EMA_STACK_ADX} & c≥EMA20"
             )
         if stack_bear:
-            kinds.append("ema_stack_bear")
-            reasons.append(
+            pro_kinds.append("ema_stack_bear")
+            pro_reasons.append(
                 f"ema_stack_bear: EMA8≤20≤50 & ADX {adx:.1f}≥{EMA_STACK_ADX} & c≤EMA20"
             )
 
-    # 4) RSI 背离（简化）
-    if ENABLE_RSI_DIVERGENCE and len(df_closed) >= DIV_LOOKBACK + 2:
+    # 4) RSI 背离
+    DIV_LOOKBACK = 18
+    DIV_TOL_PCT = 0.15
+    if len(df_closed) >= DIV_LOOKBACK + 2:
         lows = df_closed["low"].tail(DIV_LOOKBACK + 1).values
         highs = df_closed["high"].tail(DIV_LOOKBACK + 1).values
         rsi_series = ta.RSI(df_closed["close"].astype(float).values, timeperiod=14)
@@ -385,11 +940,9 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
             if pd.notna(rsi_series[-(DIV_LOOKBACK + 1)])
             else rsi
         )
-        # 多头背离：新低但 RSI 没创新低
-        bull_div = (low <= np.min(lows[:-1]) * (1 + DIV_TOL_PCT / 100.0)) and (
+        bull_div = (l <= np.min(lows[:-1]) * (1 + DIV_TOL_PCT / 100.0)) and (
             rsi >= rsi_prev * (1 - DIV_TOL_PCT / 100.0)
         )
-        # 空头背离：新高但 RSI 没创新高
         bear_div = (h >= np.max(highs[:-1]) * (1 - DIV_TOL_PCT / 100.0)) and (
             rsi <= rsi_prev * (1 + DIV_TOL_PCT / 100.0)
         )
@@ -398,190 +951,166 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
         if HTF_BEAR:
             bull_div = False
         if bull_div:
-            kinds.append("rsi_div_long")
-            reasons.append(f"rsi_div_long: price LL vs {DIV_LOOKBACK} 但 RSI 未创新低")
+            pro_kinds.append("rsi_div_long")
+            pro_reasons.append(
+                f"rsi_div_long: price LL vs {DIV_LOOKBACK} 但 RSI 未创新低"
+            )
         if bear_div:
-            kinds.append("rsi_div_short")
-            reasons.append(f"rsi_div_short: price HH vs {DIV_LOOKBACK} 但 RSI 未创新高")
+            pro_kinds.append("rsi_div_short")
+            pro_reasons.append(
+                f"rsi_div_short: price HH vs {DIV_LOOKBACK} 但 RSI 未创新高"
+            )
 
     # 5) 量能峰值反转
-    if ENABLE_CLIMAX:
-        # 峰值量能 + 长影线 + RSI 极值
-        total = max(h - low, 1e-12)
-        lower_w = max(min(o, c) - low, 0.0) / total
-        upper_w = max(h - max(o, c), 0.0) / total
-        if (
-            volr_now >= CLIMAX_VOLR
-            and lower_w >= 0.55
-            and rsi <= CLIMAX_RSI_L
-            and not HTF_BEAR
-        ):
-            kinds.append("climax_bottom")
-            reasons.append(
-                f"climax_bottom: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 下影 {lower_w:.2f} & RSI≤{CLIMAX_RSI_L}"
-            )
-        if (
-            volr_now >= CLIMAX_VOLR
-            and upper_w >= 0.55
-            and rsi >= CLIMAX_RSI_H
-            and not HTF_BULL
-        ):
-            kinds.append("climax_top")
-            reasons.append(
-                f"climax_top: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 上影 {upper_w:.2f} & RSI≥{CLIMAX_RSI_H}"
-            )
+    CLIMAX_VOLR = 5.0
+    CLIMAX_RSI_H = 72
+    CLIMAX_RSI_L = 28
+    total_rng = max(h - l, 1e-12)
+    lower_w = max(min(o, c) - l, 0.0) / total_rng
+    upper_w = max(h - max(o, c), 0.0) / total_rng
+    if (
+        volr_now >= CLIMAX_VOLR
+        and lower_w >= 0.55
+        and rsi <= CLIMAX_RSI_L
+        and not HTF_BEAR
+    ):
+        pro_kinds.append("climax_bottom")
+        pro_reasons.append(
+            f"climax_bottom: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 下影 {lower_w:.2f} & RSI≤{CLIMAX_RSI_L}"
+        )
+    if (
+        volr_now >= CLIMAX_VOLR
+        and upper_w >= 0.55
+        and rsi >= CLIMAX_RSI_H
+        and not HTF_BULL
+    ):
+        pro_kinds.append("climax_top")
+        pro_reasons.append(
+            f"climax_top: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 上影 {upper_w:.2f} & RSI≥{CLIMAX_RSI_H}"
+        )
 
-    # 6) 平衡区突破 / 假突破回收
-    if ENABLE_EQUILIBRIUM and len(df_closed) >= EQ_WIN + 2:
+    # 6) 平衡区突破/回收
+    EQ_WIN = 20
+    EQ_BREAK_BUF = 0.003
+    EQ_REJ_BODY = 0.6
+    if len(df_closed) >= EQ_WIN + 2:
         eq_h = float(df_closed["high"].tail(EQ_WIN).max())
-        eq_l = float(df_closed["low"].tail(EQ_WIN).min())
-        # 突破
+        eq_l = (
+            float(df_closed()["low"].tail(EQ_WIN).min())
+            if False
+            else float(df_closed["low"].tail(EQ_WIN).min())
+        )
         break_up = c >= eq_h * (1.0 + EQ_BREAK_BUF)
         break_dn = c <= eq_l * (1.0 - EQ_BREAK_BUF)
-        # 假突破回收（当根有明显越界但收回到区间内大部）
         reject_up = (
             (h > eq_h * (1.0 + EQ_BREAK_BUF))
             and (c <= eq_h)
-            and (abs(c - o) / max(h - low, 1e-12) >= EQ_REJ_BODY)
+            and (abs(c - o) / max(h - l, 1e-12) >= EQ_REJ_BODY)
         )
         reject_dn = (
-            (low < eq_l * (1.0 - EQ_BREAK_BUF))
+            (l < eq_l * (1.0 - EQ_BREAK_BUF))
             and (c >= eq_l)
-            and (abs(o - c) / max(h - low, 1e-12) >= EQ_REJ_BODY)
+            and (abs(o - c) / max(h - l, 1e-12) >= EQ_REJ_BODY)
         )
         if HTF_BULL:
             break_dn = reject_up = False
         if HTF_BEAR:
             break_up = reject_dn = False
         if break_up or break_dn:
-            kinds.append("equilibrium_break")
-            reasons.append(
-                f"equilibrium_break: [{eq_l:.6g}, {eq_h:.6g}] with buf {EQ_BREAK_BUF:.3f}"
+            pro_kinds.append("equilibrium_break")
+            pro_reasons.append(
+                f"equilibrium_break: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f}"
             )
         if reject_up or reject_dn:
-            kinds.append("equilibrium_reject")
-            reasons.append(
+            pro_kinds.append("equilibrium_reject")
+            pro_reasons.append(
                 f"equilibrium_reject: 假突破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
             )
 
-    # 没有新增信号
-    if not kinds:
+    # ===== 聚合：Base + Pro → 候选清单 =====
+    candidates: List[Tuple[str, List[str]]] = []
+
+    # Base
+    if explode_up:
+        candidates.append(("explode_up", []))
+    if explode_down:
+        candidates.append(("explode_down", []))
+    if pullback_long:
+        candidates.append(("pullback_long", []))
+    if pullback_short:
+        candidates.append(("pullback_short", []))
+    if cap_long:
+        candidates.append(("cap_long", []))
+    if cap_short:
+        candidates.append(("cap_short", []))
+    if bb_reversal_long:
+        candidates.append(("bb_squeeze_long", []))
+    if bb_reversal_short:
+        candidates.append(("bb_squeeze_short", []))
+    if ema_rebound_long:
+        candidates.append(("ema_rebound_long", []))
+    if ema_rebound_short:
+        candidates.append(("ema_rebound_short", []))
+
+    # Pro（附带理由）
+    for k in pro_kinds:
+        candidates.append((k, pro_reasons))  # 同一组理由共享
+
+    if not candidates:
+        dbg(
+            f"[FILTERED {symbol}] eq_bar=${eq_now_bar_usd:,.0f} volr={volr_now:.2f} pct={pct_now:.2f}% ADX={adx:.1f} no-signal"
+        )
         return False, None
 
-    # 选择一个“最有意义”的信号（简单优先级）
+    # ===== 对每个候选 kind 计算评分 & Guard =====
+    base_bonus = {
+        "ema_rebound_long": 0.12,
+        "ema_rebound_short": 0.12,
+        "bb_squeeze_long": 0.10,
+        "bb_squeeze_short": 0.10,
+        "pullback_long": 0.10,
+        "pullback_short": 0.10,
+        "cap_long": 0.15,
+        "cap_short": 0.15,
+        "explode_up": 0.15,
+        "explode_down": 0.15,
+        "trend_break_up": 0.12,
+        "trend_break_down": 0.12,
+        "equilibrium_break": 0.12,
+        "equilibrium_reject": 0.12,
+        "volume_shift_long": 0.10,
+        "volume_shift_short": 0.10,
+        "ema_stack_bull": 0.08,
+        "ema_stack_bear": 0.08,
+        "rsi_div_long": 0.12,
+        "rsi_div_short": 0.12,
+    }
+
+    # 优先级：数值越小越靠前
     priority = {
         "trend_break_up": 0,
         "trend_break_down": 0,
         "equilibrium_break": 1,
+        "equilibrium_reject": 1,
         "ema_stack_bull": 2,
         "ema_stack_bear": 2,
+        "ema_rebound_long": 2,
+        "ema_rebound_short": 2,
+        "bb_squeeze_long": 2,
+        "bb_squeeze_short": 2,
+        "pullback_long": 3,
+        "pullback_short": 3,
         "volume_shift_long": 3,
         "volume_shift_short": 3,
-        "climax_bottom": 4,
-        "climax_top": 4,
+        "cap_long": 4,
+        "cap_short": 4,
         "rsi_div_long": 5,
         "rsi_div_short": 5,
+        "explode_up": 6,
+        "explode_down": 6,
     }
-    kinds_sorted = sorted(kinds, key=lambda k: priority.get(k, 9))
-    kind = kinds_sorted[0]
-    side = (
-        "long"
-        if (
-            "_up" in kind
-            or "bull" in kind
-            or "long" in kind
-            or "bottom" in kind
-            or "break" in kind
-            and HTF_BULL
-        )
-        else "short"
-    )
 
-    # 文本/命令与评分
-    tick = get_tick_size(ex, symbol)
-    hhv_prev = df_closed["high"].iloc[:-1].tail(BO_WINDOW).max()
-    llv_prev = df_closed["low"].iloc[:-1].tail(BO_WINDOW).min()
-
-    tp1_i, tp2_i, tp3_i, sl_i = dynamic_targets(
-        symbol="NA", side=side, entry_price=c, df_closed=df_closed, tick=tick
-    )
-    entry_safe = conservative_entry(
-        symbol="NA",
-        side=side,
-        close_last=c,
-        df_closed=df_closed,
-        tick=tick,
-        hhv_prev=hhv_prev if side == "long" else None,
-        llv_prev=llv_prev if side == "short" else None,
-    )
-    tp1_s, tp2_s, tp3_s, sl_s = tpsl_for_safe_entry(side, entry_safe, tick)
-    cmd_immd = (
-        f"/forcelong {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
-        if side == "long"
-        else f"/forceshort {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
-    )
-    cmd_safe = (
-        f"/forcelong {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
-        if side == "long"
-        else f"/forceshort {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
-    )
-
-    # 趋势文本
-    tr2 = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
-    adx2 = last_adx(df_closed, period=14)
-    atrp2 = last_atr_pct(df_closed, period=14)
-    trend_text = f"Class={SYMBOL_CLASS.get(symbol, '?')} | ADX≈{adx2:.1f}, ρ={tr2['spearman']:.2f}, net%={tr2['net_pct']:.2f}, ATR%≈{atrp2:.2f} | HTF:{'BULL' if HTF_BULL else ('BEAR' if HTF_BEAR else '—')}"
-
-    # 评分（复用你的权重体系）
-    sc = (
-        W_VOLR_NOW * max(0.0, min(1.0, (volr_now - 1.0) / 4.0))
-        + W_EQ_NOW_USD * max(0.0, min(1.0, eq_now_bar_usd / max(1.0, SCALE_EQ5M_USD)))
-        + W_ABS_PCT * max(0.0, min(1.0, abs(pct_now) / max(1e-9, SCALE_ABS_PCT)))
-        + W_TREND_ALIGN
-        * (
-            1.0
-            if (HTF_BULL and side == "long") or (HTF_BEAR and side == "short")
-            else 0.0
-        )
-    )
-    # 新信号加分（与原体系接近）
-    if "trend_break" in kind:
-        sc += 0.12
-    elif "equilibrium_break" in kind:
-        sc += 0.12
-    elif "ema_stack" in kind:
-        sc += 0.08
-    elif "volume_shift" in kind:
-        sc += 0.10
-    elif "climax" in kind:
-        sc += 0.15
-    elif "rsi_div" in kind:
-        sc += 0.12
-
-    # 方向闸门惩罚与原一致
-    if HTF_BULL and side == "short":
-        sc = max(0.0, sc - 0.20)
-    elif HTF_BEAR and side == "long":
-        sc = max(0.0, sc - 0.20)
-
-    # 触发原因（限长）
-    reasons = [f"class={SYMBOL_CLASS.get(symbol, '?')}; mode={MODE}"] + reasons
-    reasons_show = reasons if PRINT_FULL_REASONS else reasons[:MAX_REASONS_IN_MSG]
-
-    text_core = [
-        f"Symbol: <b>{symbol}</b>",
-        f"Price: <code>{c:.6g}</code>",
-        f"Now {strategy.timeframe_fast}: <b>{pct_now:.2f}%</b> | VolR: <b>{volr_now:.2f}x</b> | EqBar≈<b>${eq_now_bar_usd:,.0f}</b>",
-        f"Base vps: <b>{vps_base:.4f}</b> | Trend: {trend_text}",
-        "Why: " + " ; ".join(reasons_show),
-    ]
-    if not SAFE_MODE_ALWAYS:
-        text_core.append(f"<code>{cmd_immd}</code>")
-    text_core += [
-        f"<b>Conservative Entry:</b> <code>{entry_safe}</code> | SL(≈{SAFE_SL_PCT:.1f}%): <code>{tpsl_for_safe_entry(side, entry_safe, tick)[-1]}</code>",
-        f"<code>{cmd_safe}</code>",
-    ]
-    # —— 获取 tick & 日内信息 —— #
+    # 日内信息
     tick = get_tick_size(ex, symbol)
     day_high, day_low, pct24, last_price = get_day_stats(ex, symbol, tick)
     dist_day_high_pct = (
@@ -595,6 +1124,217 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
         else None
     )
 
+    # 统一 Guard 档位与影子模式
+    level = "HARD" if MODE == "QUIET" else "MEDIUM"
+    SHADOW = False  # 观察期使用 True；要拦截则改 False
+
+    # 为每个候选构建“核心说明”，并过 Guard
+    evaluated = []
+    for kind, extra_reasons in candidates:
+        side = (
+            "long"
+            if (
+                "_up" in kind
+                or "bull" in kind
+                or "long" in kind
+                or "bottom" in kind
+                or (kind == "equilibrium_break" and HTF_BULL)
+            )
+            else "short"
+        )
+        # 评分
+        sc = (
+            W_VOLR_NOW * max(0.0, min(1.0, (volr_now - 1.0) / 4.0))
+            + W_EQ_NOW_USD
+            * max(0.0, min(1.0, eq_now_bar_usd / max(1.0, SCALE_EQ5M_USD)))
+            + W_ABS_PCT * max(0.0, min(1.0, abs(pct_now) / max(1e-9, SCALE_ABS_PCT)))
+            + W_TREND_ALIGN
+            * (
+                1.0
+                if ((HTF_BULL and side == "long") or (HTF_BEAR and side == "short"))
+                else 0.0
+            )
+        ) + base_bonus.get(kind, 0.0)
+
+        # 趋势文字（统一）
+        tr2 = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
+        adx2 = last_adx(df_closed, period=14)
+        atrp2 = last_atr_pct(df_closed, period=14)
+        trend_text = f"Class={SYMBOL_CLASS.get(symbol, '?')} | ADX≈{adx2:.1f}, ρ={tr2['spearman']:.2f}, net%={tr2['net_pct']:.2f}, ATR%≈{atrp2:.2f} | HTF:{'BULL' if HTF_BULL else ('BEAR' if HTF_BEAR else '—')}"
+
+        # 文案 reasons
+        reasons = [f"class={SYMBOL_CLASS.get(symbol, '?')}; mode={MODE}"]
+        if HTF_BULL:
+            reasons.append("HTF=15m/1h 多头闸门")
+        if HTF_BEAR:
+            reasons.append("HTF=15m/1h 空头闸门")
+        reasons += extra_reasons  # pro 的简述
+        # base 的详述（尽可能简洁）
+        if kind == "explode_up":
+            reasons += [
+                f"explode_up: volr {volr_now:.2f}≥{EXP_VOLR:.2f}",
+                f"pct_now {pct_now:.2f}%≥{UP_TH:.2f}%",
+                f"struct c≥HHV({BO_WINDOW})-tol",
+            ]
+        elif kind == "explode_down":
+            reasons += [
+                f"explode_down: volr {volr_now:.2f}≥{EXP_VOLR:.2f}",
+                f"pct_now {pct_now:.2f}%≤{min(NO_FOLLOW_UP_TH, PRICE_DN_TH):.2f}%",
+                f"struct c≤LLV({BO_WINDOW})+tol",
+            ]
+            if last_up_ts and (int(time.time()) - last_up_ts < EXPLODE_LOCK_MIN):
+                reasons.append(
+                    f"post-explode lock checked: {int(time.time()) - last_up_ts}s"
+                )
+        elif kind == "pullback_long":
+            dist_hi = (
+                float(df_closed["high"].tail(PB_LOOKBACK_HI).max() - c)
+                / max(c, 1e-12)
+                * 100.0
+            )
+            reasons += [
+                f"pullback_long: dist_HH({PB_LOOKBACK_HI}) {dist_hi:.2f}%≥{PB_HI_PCT_dyn:.2f}%",
+                f"RSI {rsi:.1f}≤{PB_RSI_TH} 或 W%R {wr:.1f}≤{PB_WR_TH}",
+                f"bounce {pct_now:.2f}%≥{PB_MIN_BOUNCE_PCT_dyn:.2f}%",
+            ]
+        elif kind == "pullback_short":
+            dist_lo = (
+                float(c - df_closed["low"].tail(PB_LOOKBACK_HI).min())
+                / max(c, 1e-12)
+                * 100.0
+            )
+            reasons += [
+                f"pullback_short: dist_LL({PB_LOOKBACK_HI}) {dist_lo:.2f}%≥{PB_HI_PCT_dyn:.2f}%",
+                f"RSI {rsi:.1f}≥{100 - PB_RSI_TH} 或 W%R {wr:.1f}≥{-100 - PB_WR_TH}",
+                f"bounce {pct_now:.2f}%≤{-PB_MIN_BOUNCE_PCT_dyn:.2f}%",
+            ]
+        elif kind == "cap_long":
+            reasons += [
+                f"cap_long: wick_low≥{CAPW_dyn:.2f}, volr {volr_now:.2f}≥{max(2.0, CAPV_dyn * 0.95):.2f}"
+            ]
+        elif kind == "cap_short":
+            reasons += [
+                f"cap_short: wick_high≥{CAPW_dyn:.2f}, volr {volr_now:.2f}≥{max(2.0, CAPV_dyn * 0.95):.2f}"
+            ]
+        elif kind == "ema_rebound_long":
+            reasons += [
+                f"ema_rebound_long: EMA20≥EMA50 & cross_up EMA8 ; volr {volr_now:.2f}≥{max(1.25, EXP_VOLR * 0.5):.2f}"
+            ]
+        elif kind == "ema_rebound_short":
+            reasons += [
+                f"ema_rebound_short: EMA20≤EMA50 & cross_down EMA8 ; volr {volr_now:.2f}≥{max(1.25, EXP_VOLR * 0.5):.2f}"
+            ]
+        elif "bb_squeeze" in kind and pd.notna(bb_width):
+            if "long" in kind:
+                reasons += [
+                    f"bb_squeeze_long: width={bb_width:.3%}≤1.50% & c≈≥Upper ; volr {volr_now:.2f}≥{max(1.6, EXP_VOLR * 0.6):.2f}"
+                ]
+            else:
+                reasons += [
+                    f"bb_squeeze_short: width={bb_width:.3%}≤1.50% & c≈≤Lower ; volr {volr_now:.2f}≥{max(1.6, EXP_VOLR * 0.6):.2f}"
+                ]
+
+        # Entry/TP/SL（与原保持一致）
+        entry_safe = conservative_entry(
+            "NA",
+            side,
+            c,
+            df_closed,
+            tick,
+            hhv_prev if side == "long" else None,
+            llv_prev if side == "short" else None,
+        )
+        tp1_s, tp2_s, tp3_s, sl_s = tpsl_for_safe_entry(side, entry_safe, tick)
+        tp1_i, tp2_i, tp3_i, sl_i = dynamic_targets("NA", side, c, df_closed, tick)
+
+        cmd_immd = (
+            f"/forcelong {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
+            if side == "long"
+            else f"/forceshort {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
+        )
+        cmd_safe = (
+            f"/forcelong {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
+            if side == "long"
+            else f"/forceshort {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
+        )
+
+        # Guard 评估（统一）
+        block, reasons_guard, votes, need_votes = _eval_guard(
+            kind,
+            side,
+            elapsed=elapsed,
+            BAR_SEC=BAR_SEC,
+            body_pct=body_pct_now,
+            rsi=rsi,
+            ema20_val=float(ema20_15) if pd.notna(ema20_15) else None,
+            c=c,
+            day_high=day_high,
+            day_low=day_low,
+            level=level,
+            shadow=SHADOW,
+            volr_now=volr_now,
+            adx_val=adx,
+            htf_bull=HTF_BULL,
+            htf_bear=HTF_BEAR,
+            squeeze_width=bb_width
+            if "bb_squeeze" in kind and pd.notna(bb_width)
+            else None,
+        )
+        status = "SHADOW" if SHADOW else ("BLOCK" if block else "PASS")
+        dbg(
+            f"[GUARD {status}] {symbol} {kind} votes={votes}/{need_votes} reasons={reasons_guard}"
+        )
+
+        # 影子模式：不过滤；实拦模式：过滤
+        if (not SHADOW) and block:
+            continue
+
+        # 汇总“文本核心”
+        reasons_show = reasons if PRINT_FULL_REASONS else reasons[:MAX_REASONS_IN_MSG]
+        text_core = [
+            f"Symbol: <b>{symbol}</b>",
+            f"Price: <code>{c:.6g}</code>",
+            f"Now {TIMEFRAME_FAST}: <b>{pct_now:.2f}%</b> | VolR: <b>{volr_now:.2f}x</b> | EqBar≈<b>${eq_now_bar_usd:,.0f}</b>",
+            f"Base vps: <b>{vps_base:.4f}</b> | Trend: {trend_text} {'✅' if ((HTF_BULL and side == 'long') or (HTF_BEAR and side == 'short')) else '—'}",
+            "Why: " + " ; ".join(reasons_show),
+        ]
+        if not SAFE_MODE_ALWAYS:
+            text_core.append(f"<code>{cmd_immd}</code>")
+        text_core += [
+            f"<b>Conservative Entry:</b> <code>{entry_safe}</code> | SL(≈{SAFE_SL_PCT:.1f}%): <code>{tpsl_for_safe_entry(side, entry_safe, tick)[-1]}</code>",
+            f"<code>{cmd_safe}</code>",
+        ]
+
+        evaluated.append(
+            {
+                "kind": kind,
+                "side": side,
+                "score": float(sc),
+                "priority": priority.get(kind, 9),
+                "text_core": text_core,
+                "trend_text": trend_text,
+                "cmd_immd": (None if SAFE_MODE_ALWAYS else text_core[-2]),
+                "cmd_safe": text_core[-1],
+            }
+        )
+
+        if kind == "explode_up":
+            LAST_EXPLODE_UP[symbol] = int(time.time())
+
+    if not evaluated:
+        return False, None
+
+    # 选择：优先级小者优先，再按分数高者
+    evaluated.sort(key=lambda x: x["score"], reverse=True)
+    evaluated.sort(key=lambda x: x["priority"])
+
+    best = evaluated[0]
+    kind = best["kind"]
+    side = best["side"]
+    sc = best["score"]
+    text_core = best["text_core"]
+    trend_text = best["trend_text"]
+
     payload = {
         "symbol": symbol,
         "kind": kind,
@@ -605,7 +1345,7 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
         "volr_now": float(volr_now),
         "vps_now": float(vps_now),
         "vps_base": float(vps_base),
-        "eq_base_bar_usd": float(vps_base * FRAME_SEC[strategy.timeframe_fast] * c),
+        "eq_base_bar_usd": float(eq_base_bar_usd),
         "eq_now_bar_usd": float(eq_now_bar_usd),
         "trend_align": bool(
             (HTF_BULL and side == "long") or (HTF_BEAR and side == "short")
@@ -613,16 +1353,16 @@ def detect_signal(ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy
         "trend_text": trend_text,
         "text_core": text_core,
         "score": float(sc),
-        "reasons": reasons,
+        "reasons": [],  # 详细原因已在 text_core 中；如需原始列表可扩展
         "day_high": day_high,
         "day_low": day_low,
         "pct24": pct24,
         "dist_day_high_pct": dist_day_high_pct,
         "dist_day_low_pct": dist_day_low_pct,
         "last_price": last_price or c,
-        "cmd_safe": text_core[-1],
+        "cmd_safe": best["cmd_safe"],
     }
-    if not SAFE_MODE_ALWAYS:
-        payload["cmd_immd"] = text_core[-2]
+    if not SAFE_MODE_ALWAYS and best["cmd_immd"] is not None:
+        payload["cmd_immd"] = best["cmd_immd"]
 
     return True, payload

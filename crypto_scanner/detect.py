@@ -1,10 +1,23 @@
 # -*- coding: utf-8 -*-
+"""
+detect.py
+基础 15m / 1h 检测逻辑（你现有的版本）+ ChaseGuard 防追价与严格确认层
+
+改动要点：
+- 保留你原有的 explode / pullback / capitulation / ema_rebound / bb_squeeze 全部规则与评分、payload 结构
+- 追加 ChaseGuard：收盘进度门槛、实体过大、接近日内极值拒绝、EMA20 溢价限制、最小 R:R 底线，多数表决（默认≥2条理由拦截）
+- MODE=QUIET 时自动走更严格的 HARD 档；普通模式 MEDIUM 档
+- 保守入场/立即入场 TP/SL 与你原版一致
+"""
+
 import time
+from typing import Dict
+from collections import defaultdict
 
 import numpy as np
 import pandas as pd
 import talib as ta
-from typing import Dict
+
 from .strategies import Strategy
 from .loggingx import dbg
 from .config import (
@@ -47,6 +60,7 @@ from .config import (
     MAX_REASONS_IN_MSG,
     FRAME_SEC,
     MIN_QV5M_USD,
+    KINDS_CN,
 )
 from .exchange import fetch_ohlcv_df, get_tick_size, round_to_tick
 from .ta_utils import (
@@ -60,15 +74,19 @@ from .ta_utils import (
 )
 from .liquidity import get_day_stats
 from .candidates import resolve_params_for_symbol, SYMBOL_CLASS
-from .config import KINDS_CN
 
-# —— 爆发后反向封控 —— #
+
+# =========================
+# 爆发后反向封控（与原版一致）
+# =========================
 LAST_EXPLODE_UP: Dict[str, int] = {}  # {symbol: ts}
 EXPLODE_LOCK_MIN = 15 * 60  # 爆发后15分钟内不做空
 EXPLODE_LOCK_RET_PCT = 0.9  # 做空前要求当根回撤 ≥ 0.9%
 
 
-# === Local minimal TP/SL helpers (就地实现，避免额外依赖) ===
+# =========================
+# TP/SL 与入场价工具（与原版一致）
+# =========================
 def _tps_from_entry(side: str, entry: float, tick: float):
     """
     用 config 中的 SAFE_TP_PCTS 生成三个分批 TP，统一按照绝对百分比。
@@ -152,16 +170,200 @@ def tpsl_for_safe_entry(side: str, entry_safe: float, tick: float):
     return (*tps, sl)
 
 
-def detect_signal(
-    ex, symbol, strong_up_map: dict, strong_dn_map: dict, strategy: Strategy
+# =========================
+# ChaseGuard：防追价 / 收盘确认 / 最小R:R 多数表决
+# 可通过 Strategy.overrides 覆盖阈值
+# =========================
+_GUARD_STATS = defaultdict(int)
+
+# 默认全局（可被每个 Strategy.overrides 覆盖）
+STRICT_DEFAULTS = {
+    # 接近日内极值时禁止追多/追空的最小“安全距离”（%）
+    "NO_CHASE_DAYEXT_GAP_PCT": 0.8,  # 与日内高/低的距离 < 0.8% 则拦截
+    # 价格相对 EMA20 的“溢价”限制（%）
+    "NO_CHASE_EMA20_PREMIUM_PCT": 1.2,
+    # 需要当前K线至少走完的比例（收盘确认），强势类信号才需要
+    "CLOSE_CONFIRM_FRAC": 0.60,
+    # 单根实体过大直接拒绝（%）
+    "MAX_BODY_FOR_LONG": 2.5,
+    "MAX_BODY_FOR_SHORT": 2.5,
+    # 最小风险收益比（R:R）底线（基于保守入场价）
+    "MIN_RR": 1.25,
+    # 哪些多/空类信号需要接近日内高/低时跳过
+    "SKIP_LONG_NEAR_DHIGH_FOR": [
+        "explode_up",
+        "ema_rebound_long",
+        "bb_squeeze_long",
+        "pullback_long",
+    ],
+    "SKIP_SHORT_NEAR_DLOW_FOR": [
+        "explode_down",
+        "ema_rebound_short",
+        "bb_squeeze_short",
+        "pullback_short",
+    ],
+    # RSI 顶/底保护（可按需使用；当前未强制启用为票据，只保留在 overrides 里可读取）
+    "RSI_CAP_LONG": 68,
+    "RSI_CAP_SHORT": 32,
+}
+
+GUARD_LEVELS = {
+    "OFF": dict(
+        need_close_frac=0.0,
+        max_body=99.0,
+        gap_pct=0.0,
+        ema20_prem=99.0,
+        min_rr=0.0,
+        votes_need=99,
+    ),
+    "SOFT": dict(
+        need_close_frac=0.50,
+        max_body=3.5,
+        gap_pct=0.5,
+        ema20_prem=1.8,
+        min_rr=1.10,
+        votes_need=2,
+    ),
+    "MEDIUM": dict(
+        need_close_frac=0.60,
+        max_body=2.5,
+        gap_pct=0.8,
+        ema20_prem=1.5,
+        min_rr=1.25,
+        votes_need=2,
+    ),
+    # ↓↓↓ 关键：把 HARD 放宽一些
+    "HARD": dict(
+        need_close_frac=0.70,
+        max_body=2.0,
+        gap_pct=1.0,
+        ema20_prem=1.6,
+        min_rr=1.25,
+        votes_need=2,
+    ),
+}
+
+
+def _eval_guard(
+    kind: str,
+    side: str,  # "long" / "short"
+    *,
+    elapsed: int,
+    BAR_SEC: int,
+    body_pct: float,
+    rsi: float | None,
+    ema20_val: float | None,
+    c: float,
+    day_high: float | None,
+    day_low: float | None,
+    entry_safe: float | None,
+    tp1_s: float | None,
+    sl_s: float | None,
+    level: str = "MEDIUM",
+    shadow: bool = False,
 ):
     """
-    15m 核心检测逻辑：形成统一 payload，供 formatter / notifier 使用。
+    根据分级参数做“多数表决”：满足 >= votes_need 即拦截。
+    shadow=True 时只统计不拦截（影子模式）。
+    """
+    P = GUARD_LEVELS[level]
+    votes = 0
+    reasons = []
+
+    # 1) 收盘确认（强波动类/追价风险类信号）
+    need_close = kind in (
+        "explode_up",
+        "explode_down",
+        "ema_rebound_long",
+        "ema_rebound_short",
+        "bb_squeeze_long",
+        "bb_squeeze_short",
+        "pullback_long",
+        "pullback_short",
+    )
+    if need_close and elapsed < int(BAR_SEC * P["need_close_frac"]):
+        votes += 1
+        reasons.append(f"close<{int(P['need_close_frac'] * 100)}%")
+
+    # 2) 实体过大（避免追大阳/大阴）
+    if body_pct > P["max_body"]:
+        votes += 1
+        reasons.append(f"body>{P['max_body']}%")
+
+    # 3) 接近日内极值（不追高/不追底）
+    if side == "long":
+        if day_high and c > 0:
+            gap = (day_high - c) / c * 100.0
+            if (
+                gap < P["gap_pct"]
+                and kind in STRICT_DEFAULTS["SKIP_LONG_NEAR_DHIGH_FOR"]
+            ):
+                votes += 1
+                reasons.append(f"nearDHigh<{P['gap_pct']}%")
+    else:
+        if day_low and c > 0:
+            gap = (c - day_low) / c * 100.0
+            if (
+                gap < P["gap_pct"]
+                and kind in STRICT_DEFAULTS["SKIP_SHORT_NEAR_DLOW_FOR"]
+            ):
+                votes += 1
+                reasons.append(f"nearDLow<{P['gap_pct']}%")
+
+    # 4) EMA20 溢价限制（价位偏离均线太多，容易追高/抄底失败）
+    if ema20_val is not None and not pd.isna(ema20_val) and ema20_val > 0:
+        prem = (c / ema20_val - 1.0) * 100.0
+        if side == "long":
+            if prem > P["ema20_prem"]:
+                votes += 1
+                reasons.append(f"ema20+{prem:.2f}%>{P['ema20_prem']}%")
+        else:
+            if (-prem) > P["ema20_prem"]:
+                votes += 1
+                reasons.append(f"ema20-{(-prem):.2f}%>{P['ema20_prem']}%")
+
+    # 5) 最小 R:R 底线（基于保守入场）
+    rr_ok = False
+    rr = None
+    if entry_safe and sl_s and tp1_s and entry_safe != sl_s:
+        if side == "long" and tp1_s > entry_safe and sl_s < entry_safe:
+            rr = (tp1_s - entry_safe) / (entry_safe - sl_s)
+        elif side == "short" and tp1_s < entry_safe and sl_s > entry_safe:
+            rr = (entry_safe - tp1_s) / (sl_s - entry_safe)
+        rr_ok = (rr is not None) and (rr >= P["min_rr"])
+    if rr_ok is False:
+        votes += 1
+        reasons.append(f"RR<{P['min_rr']}")
+
+    block = votes >= P["votes_need"]
+    if shadow:
+        block = False
+
+    _GUARD_STATS["total_seen"] += 1
+    for r in reasons:
+        _GUARD_STATS["reason_" + r] += 1
+    if block:
+        _GUARD_STATS["blocked_" + level.lower()] += 1
+
+    return block, reasons, votes, P["votes_need"]
+
+
+# =========================
+# 主函数：detect_signal
+# =========================
+def detect_signal(
+    ex,
+    symbol: str,
+    strong_up_map: dict,
+    strong_dn_map: dict,
+    strategy: Strategy,
+):
+    """
+    15m / 1h 核心检测逻辑：形成统一 payload，供 formatter / notifier 使用。
     返回 (ok, payload|None)
     """
     # 1) 周期与权重由策略提供
     TIMEFRAME_FAST = strategy.timeframe_fast
-    # TIMEFRAME_HTF = strategy.timeframe_htf
     BAR_SEC = FRAME_SEC[TIMEFRAME_FAST]
 
     # 2) 覆盖部分全局参数（如果策略提供）
@@ -170,11 +372,6 @@ def detect_signal(
         if strategy.overrides
         else MIN_QV5M_USD
     )
-    # ALERT_CD = (
-    #     strategy.overrides.get("ALERT_COOLDOWN_SEC", ALERT_COOLDOWN_SEC)
-    #     if strategy.overrides
-    #     else ALERT_COOLDOWN_SEC
-    # )
 
     # 3) 评分权重/标尺使用策略参数
     W_VOLR_NOW = strategy.w_volr_now
@@ -185,11 +382,6 @@ def detect_signal(
 
     # 4) Pullback 的回看根数
     PB_LOOKBACK_HI = strategy.pb_lookback_hi
-
-    # 5) BB 挤压阈值；爆发 QUIET 前置收缩阈值；日内极值最小距离
-    # BB_WIDTH_TH = strategy.bb_width_th
-    # CONTRACTION_TH = strategy.explode_contraction_width
-    # MIN_DIST_DAYEXT = strategy.explode_min_dist_dayext_pct
 
     # —— 数据获取 —— #
     df = fetch_ohlcv_df(
@@ -226,18 +418,17 @@ def detect_signal(
     eq_base_bar_usd = vps_base * BAR_SEC * c
     eq_now_bar_usd = vps_now * BAR_SEC * c
 
-    P = resolve_params_for_symbol(symbol)
-    EXP_VOLR = P["EXPLODE_VOLR"]
-    UP_TH = P["PRICE_UP_TH"]
-    # DN_TH = P["PRICE_DN_TH"]
-    # CAPV = P["CAP_VOLR"]
-    # CAPW = P["CAP_WICK_RATIO"]
-    PB_HI_PCT = P["PB_LOOKBACK_HI_PCT"]
-    MIN_EQBAR = P["MIN_QV5M_USD"]  # 名称沿用，含义：本 bar 等效成交额
+    # —— 符号参数（因子/门槛） —— #
+    Pm = resolve_params_for_symbol(symbol)
+    EXP_VOLR = Pm["EXPLODE_VOLR"]
+    UP_TH = Pm["PRICE_UP_TH"]
+    PB_HI_PCT = Pm["PB_LOOKBACK_HI_PCT"]
+    MIN_EQBAR = Pm["MIN_QV5M_USD"]  # 名称沿用，含义：本 bar 等效成交额
 
     if eq_now_bar_usd < MIN_EQBAR:
         return False, None
 
+    # —— 趋势与波动 —— #
     tr = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
     adx = last_adx(df_closed, period=14)
     atrp = last_atr_pct(df_closed, period=14)
@@ -306,7 +497,7 @@ def detect_signal(
         and c <= ema20_1h
     )
 
-    # 爆发（15m）
+    # —— 爆发（15m） —— #
     pct_now = percent_change(c, o)
     explode_up = (volr_now >= EXP_VOLR) and (pct_now >= UP_TH)
     explode_down = (volr_now >= EXP_VOLR) and (
@@ -358,7 +549,7 @@ def detect_signal(
                 if not (_recent_min <= EXPLODE_CONTRACTION_BB_WIDTH):
                     explode_up = explode_down = False
 
-    # 自适应（放宽/收紧）
+    # —— 自适应（放宽/收紧） —— #
     PB_MIN_BOUNCE_PCT_dyn = max(
         0.03, min(0.08, PB_MIN_BOUNCE_PCT * (0.7 if adx >= ADX_MIN_TREND else 0.85))
     )
@@ -366,7 +557,7 @@ def detect_signal(
     CAPV_dyn = max(2.2, CAP_VOLR * (0.85 if not is_trending else 1.0))
     CAPW_dyn = max(0.40, min(0.75, CAP_WICK_RATIO * (0.9 if not is_trending else 1.0)))
 
-    # Pullback（顺势回撤）
+    # —— Pullback（顺势回撤） —— #
     def recent_high_distance_pct(
         df_closed_: pd.DataFrame, lookback: int, price_now: float
     ) -> float:
@@ -401,7 +592,7 @@ def detect_signal(
                 and (pct_now <= -PB_MIN_BOUNCE_PCT_dyn)
             )
 
-    # Capitulation（允许弱趋势）
+    # —— Capitulation（允许弱趋势） —— #
     def lower_wick_ratio(o_, h_, l_, c_):
         total = max(h_ - l_, 1e-12)
         lower = max(min(o_, c_) - l_, 0.0)
@@ -436,7 +627,7 @@ def detect_signal(
         ):
             cap_short = True
 
-    # EMA 回踩（15m）
+    # —— EMA 回踩（15m） —— #
     ema8 = (
         ta.EMA(close_15m, timeperiod=8)
         if len(close_15m) >= 8
@@ -480,7 +671,7 @@ def detect_signal(
             dn_trend_ok and cross_down and (volr_now >= volr_soft) and short_momo
         )
 
-    # BB 挤压（15m）
+    # —— BB 挤压（15m） —— #
     bb_upper, bb_mid, bb_lower = (
         ta.BBANDS(close_15m, timeperiod=20, nbdevup=2, nbdevdn=2, matype=0)
         if len(close_15m) >= 20
@@ -669,9 +860,12 @@ def detect_signal(
     tr2 = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
     adx2 = last_adx(df_closed, period=14)
     atrp2 = last_atr_pct(df_closed, period=14)
-    trend_text = f"Class={SYMBOL_CLASS.get(symbol, '?')} | ADX≈{adx2:.1f}, ρ={tr2['spearman']:.2f}, net%={tr2['net_pct']:.2f}, ATR%≈{atrp2:.2f} | HTF:{'BULL' if HTF_BULL else ('BEAR' if HTF_BEAR else '—')}"
+    trend_text = (
+        f"Class={SYMBOL_CLASS.get(symbol, '?')} | ADX≈{adx2:.1f}, ρ={tr2['spearman']:.2f}, "
+        f"net%={tr2['net_pct']:.2f}, ATR%≈{atrp2:.2f} | HTF:{'BULL' if HTF_BULL else ('BEAR' if HTF_BEAR else '—')}"
+    )
 
-    # —— 触发原因 —— #
+    # —— 触发原因（基础） —— #
     reasons = [f"class={SYMBOL_CLASS.get(symbol, '?')}; mode={MODE}"]
     if HTF_BULL:
         reasons.append("HTF=15m/1h 多头闸门")
@@ -772,13 +966,13 @@ def detect_signal(
         sc = max(0.0, sc - 0.20)
 
     # —— 文本核心 + 命令 —— #
+    reasons_show = reasons if PRINT_FULL_REASONS else reasons[:MAX_REASONS_IN_MSG]
     text_core = [
         f"Symbol: <b>{symbol}</b>",
         f"Price: <code>{c:.6g}</code>",
         f"Now {TIMEFRAME_FAST}: <b>{pct_now:.2f}%</b> | VolR: <b>{volr_now:.2f}x</b> | EqBar≈<b>${eq_now_bar_usd:,.0f}</b>",
         f"Base vps: <b>{vps_base:.4f}</b> | Trend: {trend_text} {'✅' if trend_align else '—'}",
-        "Why: "
-        + " ; ".join((reasons if PRINT_FULL_REASONS else reasons[:MAX_REASONS_IN_MSG])),
+        "Why: " + " ; ".join(reasons_show),
     ]
     if not SAFE_MODE_ALWAYS:
         text_core.append(f"<code>{cmd_immd}</code>")
@@ -787,11 +981,60 @@ def detect_signal(
         f"<code>{cmd_safe}</code>",
     ]
 
+    # =========================
+    # 应用 ChaseGuard（分级/多数表决）
+    # =========================
+    # 合并 overrides
+    S = dict(STRICT_DEFAULTS)
+    if getattr(strategy, "overrides", None):
+        for k in S.keys():
+            if k in strategy.overrides:
+                S[k] = strategy.overrides[k]
+
+    body_pct = abs(c - o) / max(o, 1e-12) * 100.0
+    side_now = (
+        "long"
+        if ("_long" in kind or "explode_up" in kind or kind in ("cap_long",))
+        else "short"
+    )
+    level = "HARD" if MODE == "QUIET" else "MEDIUM"
+    SHADOW = True  # 如需先观察数据不拦截，可改 True
+
+    block, reasons_guard, votes, need_votes = _eval_guard(
+        kind,
+        side_now,
+        elapsed=elapsed,
+        BAR_SEC=BAR_SEC,
+        body_pct=body_pct,
+        rsi=rsi,
+        ema20_val=float(ema20_15) if pd.notna(ema20_15) else None,
+        c=c,
+        day_high=day_high,
+        day_low=day_low,
+        entry_safe=entry_safe,
+        tp1_s=tp1_s,
+        sl_s=sl_s,
+        level=level,
+        shadow=SHADOW,
+    )
+    # ✅ 无论是否阻断，都打印一条日志（SHADOW 下会显示 SHADOW）
+    status = "SHADOW" if SHADOW else ("BLOCK" if block else "PASS")
+    from .loggingx import dbg
+
+    dbg(
+        f"[GUARD {status}] {symbol} {kind} votes={votes}/{need_votes} reasons={reasons_guard}"
+    )
+
+    # 仅在非影子模式且被阻断时才返回
+    if (not SHADOW) and block:
+        return False, None
+
+    # —— payload —— #
     payload = {
         "symbol": symbol,
         "kind": kind,
-        "kind_cn": kind_cn,
-        "title": kind_cn,
+        "kind_cn": KINDS_CN.get(kind, kind),
+        "title": KINDS_CN.get(kind, kind),
         "timeframe_fast": strategy.timeframe_fast,
         "pct_now": float(pct_now),
         "volr_now": float(volr_now),

@@ -17,34 +17,50 @@ from .formatter import format_signal_cn
 PENDING_DELETES = []
 
 
-def telegram_send(text: str, parse_mode="HTML"):
+def telegram_send(text: str, parse_mode="HTML", retries: int = 3, backoff: float = 1.0):
+    """
+    向 Telegram 发送消息，带重试机制。
+    :param text: 消息文本
+    :param parse_mode: HTML 或 Markdown
+    :param retries: 最大重试次数
+    :param backoff: 初始重试间隔（秒），后续指数退避
+    """
     if not TG_BOT_TOKEN or not TG_CHAT_ID:
         dbg("TG disabled -> print")
         print(text)
         return None
+
     url = f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage"
-    try:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": TG_CHAT_ID,
-                "text": text,
-                "parse_mode": parse_mode,
-                "disable_web_page_preview": True,
-            },
-            timeout=10,
-        )
-        r.raise_for_status()
-        data = r.json()
-        if data.get("ok") and isinstance(data.get("result"), dict):
-            mid = data["result"].get("message_id")
-            return (TG_CHAT_ID, mid)
-        else:
-            dbg(f"TG send non-ok: {data}")
-            return None
-    except Exception as e:
-        print("[TG ERROR]", e)
-        return None
+    payload = {
+        "chat_id": TG_CHAT_ID,
+        "text": text,
+        "parse_mode": parse_mode,
+        "disable_web_page_preview": True,
+    }
+
+    for attempt in range(1, retries + 1):
+        try:
+            r = requests.post(url, data=payload, timeout=10)
+            r.raise_for_status()
+            data = r.json()
+
+            if data.get("ok") and isinstance(data.get("result"), dict):
+                mid = data["result"].get("message_id")
+                return (TG_CHAT_ID, mid)
+            else:
+                dbg(f"TG send non-ok (attempt {attempt}): {data}")
+
+        except Exception as e:
+            dbg(f"[TG ERROR] Attempt {attempt}: {e}")
+
+        # 如果还没到最后一次，就等待后重试
+        if attempt < retries:
+            sleep_time = backoff * (2 ** (attempt - 1))
+            dbg(f"Retrying in {sleep_time:.1f}s...")
+            time.sleep(sleep_time)
+
+    dbg("[TG ERROR] All retry attempts failed.")
+    return None
 
 
 def schedule_delete(chat_id, message_id, due_ts: int):
