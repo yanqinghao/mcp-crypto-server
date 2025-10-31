@@ -1,13 +1,22 @@
 # -*- coding: utf-8 -*-
 """
-detect.py  (Fused)
+detect.py  (Fused, patched)
 —— Base 信号 + Pro 扩展信号，统一进入 ChaseGuard 多数表决
 要点：
 - 保留原 Base 五类：explode / pullback / capitulation / ema_rebound / bb_squeeze
 - 增加 Pro 六类：trend_break_* / volume_shift_* / ema_stack_* / rsi_div_* / climax_* / equilibrium_*
-- Guard 只看“信号本身与环境”票据：不再用 RR 作为票据（用户已说明 RR 与其 TP/SL 逻辑冗余）
+- 新增 Pro 扩展：equilibrium_persist_up/down（平衡区突破后 N 根内不反包）
+- Guard 只看“信号本身与环境”票据：不再用 RR 作为票据
 - 新票据：最低量能 VolR、HTF 趋势错位、动量豁免收紧(仅当 volr>=2.2 & ADX>=18)、扁平无量、squeeze 带宽过宽
 - MODE=QUIET → 使用 HARD 档；否则 MEDIUM 档；可通过 strategy.overrides 覆盖细项
+- （本版补丁）
+  · 修复 equilibrium_persist_* NaN 判断 & 放宽反包定义
+  · 结构类票数 3→2，ema_stack_* 候选前置硬条件 + 35min 冷却
+  · RSI 背离放宽容差，HTF 不再直接禁（交由 Guard）
+  · climax_* 轻度放宽
+  · Guard: VolR 阈值按 ADX 自适应；ema_stack_* 的 flat & no volume 不计票；
+    对回踩/反弹类放宽“接近日内极值”的票据
+  · CLASS_ADJ：按 SYMBOL_CLASS 自适应（MEGA/GOLD 放宽量能等）
 """
 
 import time
@@ -76,11 +85,24 @@ from .candidates import resolve_params_for_symbol, SYMBOL_CLASS
 
 
 # =========================
+# 配置：平衡区突破自适应参数 & 持续窗口
+# =========================
+EQ_BREAK_BUF_BASE = 0.003  # 0.30% 基础越界缓冲
+EQ_MIN_BODY_PCT_BASE = 0.003  # 0.30% 最小实体百分比（相对开盘）
+EQ_ATR_REF = 2.0  # 参考 ATR%，用于自适应
+EQ_PERSIST_N = 3  # 突破后 N 根内不反包，即触发 equilibrium_persist_*
+
+# =========================
 # 近爆发做空锁（与原版一致）
 # =========================
 LAST_EXPLODE_UP: Dict[str, int] = {}  # {symbol: ts}
 EXPLODE_LOCK_MIN = 15 * 60
 EXPLODE_LOCK_RET_PCT = 0.9
+
+# =========================
+# EMA 堆叠冷却
+# =========================
+LAST_EMA_STACK_TS: Dict[str, int] = {}
 
 
 # =========================
@@ -166,8 +188,12 @@ LOCAL_KINDS_CN = {
     "rsi_div_short": "RSI 背离 · 空",
     "climax_bottom": "量能峰值 · 见底",
     "climax_top": "量能峰值 · 见顶",
-    "equilibrium_break": "平衡区突破",
-    "equilibrium_reject": "平衡区假突破 · 回收",
+    "equilibrium_break_up": "平衡区上破",
+    "equilibrium_break_down": "平衡区下破",
+    "equilibrium_reject_up": "假上破 · 回收",
+    "equilibrium_reject_down": "假下破 · 回收",
+    "equilibrium_persist_up": "平衡区上破 · 持续",
+    "equilibrium_persist_down": "平衡区下破 · 持续",
 }
 
 
@@ -194,6 +220,8 @@ STRICT_DEFAULTS = {
         "ema_stack_bull",
         "trend_break_up",
         "volume_shift_long",
+        "equilibrium_break_up",
+        "equilibrium_persist_up",
     ],
     "SKIP_SHORT_NEAR_DLOW_FOR": [
         "explode_down",
@@ -203,6 +231,8 @@ STRICT_DEFAULTS = {
         "ema_stack_bear",
         "trend_break_down",
         "volume_shift_short",
+        "equilibrium_break_down",
+        "equilibrium_persist_down",
     ],
     "RSI_CAP_LONG": 68,
     "RSI_CAP_SHORT": 32,
@@ -218,7 +248,7 @@ GUARD_LEVELS = {
         votes_need=99,
     ),
     "SOFT": dict(
-        need_close_frac=0.50,
+        need_close_frac=0.0,
         max_body=3.5,
         gap_pct=0.6,
         ema20_prem=2.2,
@@ -226,7 +256,7 @@ GUARD_LEVELS = {
         votes_need=2,
     ),
     "MEDIUM": dict(
-        need_close_frac=0.60,
+        need_close_frac=0.0,
         max_body=2.5,
         gap_pct=1.0,
         ema20_prem=2.0,
@@ -234,7 +264,7 @@ GUARD_LEVELS = {
         votes_need=2,
     ),
     "HARD": dict(
-        need_close_frac=0.70,
+        need_close_frac=0.0,
         max_body=2.0,
         gap_pct=1.2,
         ema20_prem=2.0,
@@ -244,7 +274,6 @@ GUARD_LEVELS = {
 }
 
 # 某些信号需要更高/更低 VolR 底线（种类修正）
-# <<< PATCH: 收紧 ema_stack、放宽结构类 >>>
 MIN_VOLR_BY_KIND = {
     # 收紧：确认类需要更扎实量能
     "ema_stack_bull": 1.8,
@@ -254,24 +283,39 @@ MIN_VOLR_BY_KIND = {
     "volume_shift_short": 1.6,
     "bb_squeeze_long": 1.6,
     "bb_squeeze_short": 1.6,
-    # 放宽：结构类允许稍微低些量能（以免两票秒拦）
-    "equilibrium_break": 1.3,
+    # 放宽：结构类允许稍低量能（以免两票秒拦）
+    "equilibrium_break_up": 1.3,
+    "equilibrium_break_down": 1.3,
+    "equilibrium_reject_up": 1.3,
+    "equilibrium_reject_down": 1.3,
+    "equilibrium_persist_up": 1.3,
+    "equilibrium_persist_down": 1.3,
     "trend_break_up": 1.4,
     "trend_break_down": 1.4,
 }
 
-# 可选：提高部分“易泛滥信号”的票数门槛
-# —— 结构类设为 3 票；ema_stack 恢复为使用档位默认（MEDIUM/HARD 的 votes_need=2）
-# <<< PATCH: 票数门槛调整 >>>
+# 提高部分“易泛滥信号”的票数门槛（结构类 3 -> 2）
 VOTES_NEED_BY_KIND = {
-    "volume_shift_long": 3,
-    "volume_shift_short": 3,
-    "bb_squeeze_long": 3,
-    "bb_squeeze_short": 3,
-    # 结构类：3 票
-    "equilibrium_break": 3,
-    "trend_break_up": 3,
-    "trend_break_down": 3,
+    "volume_shift_long": 2,
+    "volume_shift_short": 2,
+    "bb_squeeze_long": 2,
+    "bb_squeeze_short": 2,
+    "equilibrium_break_up": 2,
+    "equilibrium_break_down": 2,
+    "equilibrium_reject_up": 2,
+    "equilibrium_reject_down": 2,
+    "equilibrium_persist_up": 2,
+    "equilibrium_persist_down": 2,
+    "trend_break_up": 2,
+    "trend_break_down": 2,
+}
+
+# === Symbol-class adjustments (optional) ===
+CLASS_ADJ = {
+    "MEGA": dict(volr_scale=0.85, gap_add=+0.2, need_close_add=0),  # BTC/ETH/DOGE
+    "GOLD": dict(volr_scale=0.80, gap_add=+0.3, need_close_add=0),  # PAXG/金锚品
+    "ALTS": dict(volr_scale=1.00, gap_add=0.0, need_close_add=0.00),
+    "MICRO": dict(volr_scale=1.10, gap_add=-0.2, need_close_add=0),
 }
 
 
@@ -279,6 +323,7 @@ def _eval_guard(
     kind: str,
     side: str,  # "long"/"short"
     *,
+    symbol: str,  # <— 新增：用于类目自适应
     elapsed: int,
     BAR_SEC: int,
     body_pct: float,
@@ -296,7 +341,21 @@ def _eval_guard(
     htf_bear: bool = False,
     squeeze_width: float | None = None,
 ):
-    P = GUARD_LEVELS[level]
+    """
+    Guard 内部做“类目自适应”而不污染全局 GUARD_LEVELS。
+    """
+    # 基础档位参数
+    P = dict(GUARD_LEVELS[level])
+
+    # 类目自适应
+    klass = SYMBOL_CLASS.get(symbol, "ALTS")
+    adj = CLASS_ADJ.get(klass, CLASS_ADJ["ALTS"])
+    P["min_volr"] = P["min_volr"] * adj["volr_scale"]
+    P["gap_pct"] = P["gap_pct"] + adj["gap_add"]
+    P["need_close_frac"] = float(
+        np.clip(P["need_close_frac"] + adj.get("need_close_add", 0.0), 0.0, 0.80)
+    )
+
     votes = 0
     reasons: List[str] = []
 
@@ -316,6 +375,12 @@ def _eval_guard(
         "trend_break_down",
         "volume_shift_long",
         "volume_shift_short",
+        "equilibrium_break_up",
+        "equilibrium_break_down",
+        "equilibrium_persist_up",
+        "equilibrium_persist_down",
+        "equilibrium_reject_up",
+        "equilibrium_reject_down",
     )
     if need_close and elapsed < int(BAR_SEC * P["need_close_frac"]):
         votes += 1
@@ -326,30 +391,43 @@ def _eval_guard(
         votes += 1
         reasons.append(f"body>{P['max_body']}%")
 
-    # 3) 接近日内极值（不追高/不抄底）
+    # 3) 接近日内极值（不追高/不抄底）——对回踩/反弹类放宽
+    NEAR_CAP_FOR_LONG = STRICT_DEFAULTS["SKIP_LONG_NEAR_DHIGH_FOR"]
+    NEAR_CAP_FOR_SHORT = STRICT_DEFAULTS["SKIP_SHORT_NEAR_DLOW_FOR"]
+    relax_for = {
+        "pullback_long",
+        "pullback_short",
+        "ema_rebound_long",
+        "ema_rebound_short",
+    }
     if side == "long":
-        if (day_high and c > 0) and kind in STRICT_DEFAULTS["SKIP_LONG_NEAR_DHIGH_FOR"]:
+        if (
+            (day_high and c > 0)
+            and (kind in NEAR_CAP_FOR_LONG)
+            and (kind not in relax_for)
+        ):
             gap = (day_high - c) / c * 100.0
             if gap < P["gap_pct"]:
                 votes += 1
                 reasons.append(f"nearDHigh<{P['gap_pct']}%")
     else:
-        if (day_low and c > 0) and kind in STRICT_DEFAULTS["SKIP_SHORT_NEAR_DLOW_FOR"]:
+        if (
+            (day_low and c > 0)
+            and (kind in NEAR_CAP_FOR_SHORT)
+            and (kind not in relax_for)
+        ):
             gap = (c - day_low) / c * 100.0
             if gap < P["gap_pct"]:
                 votes += 1
                 reasons.append(f"nearDLow<{P['gap_pct']}%")
 
     # 4) EMA20 溢价限制 + 动量豁免收紧
-    # <<< PATCH: 仅对 ema 依赖强的种类开放“软票”，结构类禁用软票 >>>
     prem = None
     if ema20_val is not None and not pd.isna(ema20_val) and ema20_val > 0:
         prem = (c / ema20_val - 1.0) * 100.0
         momo_exempt = volr_now >= 2.2 and adx_val >= 18.0  # 仅强动量才豁免
 
         def _ema_soft_vote_allowed(kind_: str) -> bool:
-            # 仅对“均线依赖度高”的种类开放软票；
-            # 结构类（trend_break_*, equilibrium_*）不吃软票，避免两票秒拦
             return (
                 kind_.startswith("ema_stack_")
                 or kind_.startswith("bb_squeeze_")
@@ -358,7 +436,6 @@ def _eval_guard(
             )
 
         if not momo_exempt:
-            # 硬阈值票（超过档位阈值）
             if side == "long" and prem > P["ema20_prem"]:
                 votes += 1
                 reasons.append(f"ema20+{prem:.2f}%>{P['ema20_prem']}%")
@@ -366,21 +443,21 @@ def _eval_guard(
                 votes += 1
                 reasons.append(f"ema20-{(-prem):.2f}%>{P['ema20_prem']}%")
             else:
-                # 软票：仅允许在 ema 相关类生效；结构类禁用软票
                 if _ema_soft_vote_allowed(kind) and abs(prem) >= 0.4:
                     votes += 1
                     reasons.append(f"ema20±{abs(prem):.2f}%≤{P['ema20_prem']:.1f}%")
         else:
-            # 动量豁免时仅记录信息，不加票
             reasons.append(f"ema20±{abs(prem or 0):.2f}% (momo_exempt)")
 
-    # 5) 量能底线（按档位 + 种类修正）
-    min_volr_need = max(P["min_volr"], MIN_VOLR_BY_KIND.get(kind, 0.0))
+    # 5) 量能底线（档位 + 种类修正 + ADX 自适应）
+    base_min = max(P["min_volr"], MIN_VOLR_BY_KIND.get(kind, 0.0))
+    adj_adx = np.clip((18.0 - adx_val) * 0.02, -0.3, 0.4)  # ADX 高→门槛降，低→升
+    min_volr_need = max(1.2, base_min + adj_adx)
     if volr_now < min_volr_need:
         votes += 1
         reasons.append(f"VolR<{min_volr_need:.1f}x")
 
-    # 6) 趋势闸门错位（与 HTF 相反向）
+    # 6) 趋势闸门错位（与 HTF 相反向）——reject 不施加
     if not kind.startswith("cap_") and "equilibrium_reject" not in kind:
         if side == "long" and htf_bear:
             votes += 1
@@ -389,14 +466,15 @@ def _eval_guard(
             votes += 1
             reasons.append("trend-align offset")
 
-    # 7) 扁平/无量（几乎没波动且无量）
-    # 注：对结构类（trend_break / equilibrium）不施加此软票，避免两票秒拦
-    # <<< PATCH: 排除结构类 >>>
+    # 7) 扁平/无量（结构类不施加；ema_stack_* 不计票，仅提示）
     if "equilibrium" not in kind and "trend_break" not in kind:
         if c > 0:
             if volr_now < (P["min_volr"] + 0.1) and body_pct < 0.15:
-                votes += 1
-                reasons.append("flat & no volume")
+                if kind.startswith("ema_stack_"):
+                    reasons.append("flat & no volume")
+                else:
+                    votes += 1
+                    reasons.append("flat & no volume")
 
     # 8) squeeze 带宽过宽
     if "bb_squeeze" in kind and (squeeze_width is not None):
@@ -404,15 +482,11 @@ def _eval_guard(
             votes += 1
             reasons.append("squeeze range too wide")
 
-    # 9) 专门收紧：EMA 多/空头确认（确认类）的质量票
-    # <<< PATCH: ema_stack 质量票（ADX/RSI） >>>
+    # 9) 收紧 ema_stack（ADX/RSI）
     if kind in ("ema_stack_bull", "ema_stack_bear"):
-        # 趋势质量不够（ADX 偏低）→ 加 1 票
         if adx_val < 20.0:
             votes += 1
             reasons.append("weak-trend ADX<20")
-
-        # 过热/过冷保护：多头确认不追高，空头确认不抄绝对底
         if rsi is not None and not pd.isna(rsi):
             if kind == "ema_stack_bull" and rsi >= 68:
                 votes += 1
@@ -421,8 +495,6 @@ def _eval_guard(
                 votes += 1
                 reasons.append("RSI<32 (oversold)")
 
-    # —— 汇总 —— #
-    # 针对个别信号提高票数门槛
     need_votes = max(P["votes_need"], VOTES_NEED_BY_KIND.get(kind, P["votes_need"]))
     block = votes >= need_votes
     if shadow:
@@ -821,7 +893,6 @@ def detect_signal(
     pro_kinds: List[str] = []
     pro_reasons: List[str] = []
 
-    # poly slope
     def _poly_slope(arr):
         x = np.arange(len(arr))
         try:
@@ -851,22 +922,22 @@ def detect_signal(
     TB_UP_BUF = 0.002
     TB_DN_BUF = 0.002
     if len(df_closed) >= TB_LOOKBACK + 2:
-        highs = df_closed["high"].tail(TB_LOOKBACK).values
-        lows = df_closed["low"].tail(TB_LOOKBACK).values
-        s_h = _poly_slope(highs)
-        s_l = _poly_slope(lows)
-        break_up = (s_h < 0) and (c >= highs[-1] * (1.0 + TB_UP_BUF))
-        break_dn = (s_l > 0) and (c <= lows[-1] * (1.0 - TB_DN_BUF))
+        highs_ = df_closed["high"].tail(TB_LOOKBACK).values
+        lows_ = df_closed["low"].tail(TB_LOOKBACK).values
+        s_h = _poly_slope(highs_)
+        s_l = _poly_slope(lows_)
+        break_up_tb = (s_h < 0) and (c >= highs_[-1] * (1.0 + TB_UP_BUF))
+        break_dn_tb = (s_l > 0) and (c <= lows_[-1] * (1.0 - TB_DN_BUF))
         if HTF_BULL:
-            break_dn = False
+            break_dn_tb = False
         if HTF_BEAR:
-            break_up = False
-        if break_up:
+            break_up_tb = False
+        if break_up_tb:
             pro_kinds.append("trend_break_up")
             pro_reasons.append(
                 f"trend_break_up: slope(H)<0 & c≥H_last*(1+{TB_UP_BUF:.3f})"
             )
-        if break_dn:
+        if break_dn_tb:
             pro_kinds.append("trend_break_down")
             pro_reasons.append(
                 f"trend_break_down: slope(L)>0 & c≤L_last*(1-{TB_DN_BUF:.3f})"
@@ -892,8 +963,13 @@ def detect_signal(
                     f"volume_shift_short: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
                 )
 
-    # 3) EMA 多/空头排列
+    # 3) EMA 多/空头排列（前置硬条件 + 冷却）
     EMA_STACK_ADX = 16
+    EMA_GAP_MIN_PCT = 0.25  # EMA8-20 与 EMA20-50 至少 0.25%
+    EMA20_SLOPE_WIN = 6  # 近 6 根 EMA20 斜率方向一致
+    RNG_MIN_PCT = 0.60  # 当根振幅至少 0.60%（避免横摆假堆叠）
+    EMA_STACK_COOLDOWN = 35 * 60  # 35 分钟冷却
+
     if (
         len(close_15m) >= 50
         and isinstance(ema8_arr, np.ndarray)
@@ -903,53 +979,72 @@ def detect_signal(
         and isinstance(ema50_arr, np.ndarray)
         and pd.notna(ema50_arr[-1])
     ):
-        stack_bull = (
+        gap_8_20 = abs(ema8_arr[-1] - ema20_arr[-1]) / max(ema20_arr[-1], 1e-12) * 100.0
+        gap_20_50 = (
+            abs(ema20_arr[-1] - ema50_arr[-1]) / max(ema50_arr[-1], 1e-12) * 100.0
+        )
+        ema20_slope = _poly_slope(ema20_arr[-EMA20_SLOPE_WIN:])
+        rng_pct_now2 = (h - l) / max(o, 1e-12) * 100.0
+
+        pre_ok_bull = (
             (ema8_arr[-1] >= ema20_arr[-1] >= ema50_arr[-1])
             and (adx >= EMA_STACK_ADX)
             and (c >= ema20_arr[-1])
+            and (gap_8_20 >= EMA_GAP_MIN_PCT)
+            and (gap_20_50 >= EMA_GAP_MIN_PCT)
+            and (ema20_slope > 0.0)
+            and (rng_pct_now2 >= RNG_MIN_PCT)
         )
-        stack_bear = (
+        pre_ok_bear = (
             (ema8_arr[-1] <= ema20_arr[-1] <= ema50_arr[-1])
             and (adx >= EMA_STACK_ADX)
             and (c <= ema20_arr[-1])
+            and (gap_8_20 >= EMA_GAP_MIN_PCT)
+            and (gap_20_50 >= EMA_GAP_MIN_PCT)
+            and (ema20_slope < 0.0)
+            and (rng_pct_now2 >= RNG_MIN_PCT)
         )
+
+        nowi = int(time.time())
+        last_ts = LAST_EMA_STACK_TS.get(symbol, 0)
+        cooldown_ok = (nowi - last_ts) >= EMA_STACK_COOLDOWN
+
         if HTF_BULL:
-            stack_bear = False
+            pre_ok_bear = False
         if HTF_BEAR:
-            stack_bull = False
-        if stack_bull:
+            pre_ok_bull = False
+
+        if pre_ok_bull and cooldown_ok:
             pro_kinds.append("ema_stack_bull")
             pro_reasons.append(
-                f"ema_stack_bull: EMA8≥20≥50 & ADX {adx:.1f}≥{EMA_STACK_ADX} & c≥EMA20"
+                f"ema_stack_bull: EMA8≥20≥50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%"
             )
-        if stack_bear:
+            LAST_EMA_STACK_TS[symbol] = nowi
+        if pre_ok_bear and cooldown_ok:
             pro_kinds.append("ema_stack_bear")
             pro_reasons.append(
-                f"ema_stack_bear: EMA8≤20≤50 & ADX {adx:.1f}≥{EMA_STACK_ADX} & c≤EMA20"
+                f"ema_stack_bear: EMA8≤20≤50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%"
             )
+            LAST_EMA_STACK_TS[symbol] = nowi
 
-    # 4) RSI 背离
+    # 4) RSI 背离（放宽容差 & 不再被 HTF 直接禁掉，交给 Guard）
     DIV_LOOKBACK = 18
-    DIV_TOL_PCT = 0.15
+    DIV_TOL_PCT = 0.22  # from 0.15 -> 0.22
     if len(df_closed) >= DIV_LOOKBACK + 2:
-        lows = df_closed["low"].tail(DIV_LOOKBACK + 1).values
-        highs = df_closed["high"].tail(DIV_LOOKBACK + 1).values
+        lows_ = df_closed["low"].tail(DIV_LOOKBACK + 1).values
+        highs_ = df_closed["high"].tail(DIV_LOOKBACK + 1).values
         rsi_series = ta.RSI(df_closed["close"].astype(float).values, timeperiod=14)
         rsi_prev = (
             float(rsi_series[-(DIV_LOOKBACK + 1)])
             if pd.notna(rsi_series[-(DIV_LOOKBACK + 1)])
             else rsi
         )
-        bull_div = (l <= np.min(lows[:-1]) * (1 + DIV_TOL_PCT / 100.0)) and (
+        bull_div = (l <= np.min(lows_[:-1]) * (1 + DIV_TOL_PCT / 100.0)) and (
             rsi >= rsi_prev * (1 - DIV_TOL_PCT / 100.0)
         )
-        bear_div = (h >= np.max(highs[:-1]) * (1 - DIV_TOL_PCT / 100.0)) and (
+        bear_div = (h >= np.max(highs_[:-1]) * (1 - DIV_TOL_PCT / 100.0)) and (
             rsi <= rsi_prev * (1 + DIV_TOL_PCT / 100.0)
         )
-        if HTF_BULL:
-            bear_div = False
-        if HTF_BEAR:
-            bull_div = False
         if bull_div:
             pro_kinds.append("rsi_div_long")
             pro_reasons.append(
@@ -961,16 +1056,16 @@ def detect_signal(
                 f"rsi_div_short: price HH vs {DIV_LOOKBACK} 但 RSI 未创新高"
             )
 
-    # 5) 量能峰值反转
-    CLIMAX_VOLR = 5.0
-    CLIMAX_RSI_H = 72
-    CLIMAX_RSI_L = 28
+    # 5) 量能峰值反转（轻度放宽）
+    CLIMAX_VOLR = 4.2  # from 5.0
+    CLIMAX_RSI_H = 70  # from 72
+    CLIMAX_RSI_L = 30  # from 28
     total_rng = max(h - l, 1e-12)
     lower_w = max(min(o, c) - l, 0.0) / total_rng
     upper_w = max(h - max(o, c), 0.0) / total_rng
     if (
         volr_now >= CLIMAX_VOLR
-        and lower_w >= 0.55
+        and lower_w >= 0.50  # from 0.55
         and rsi <= CLIMAX_RSI_L
         and not HTF_BEAR
     ):
@@ -980,7 +1075,7 @@ def detect_signal(
         )
     if (
         volr_now >= CLIMAX_VOLR
-        and upper_w >= 0.55
+        and upper_w >= 0.50
         and rsi >= CLIMAX_RSI_H
         and not HTF_BULL
     ):
@@ -989,19 +1084,29 @@ def detect_signal(
             f"climax_top: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 上影 {upper_w:.2f} & RSI≥{CLIMAX_RSI_H}"
         )
 
-    # 6) 平衡区突破/回收
+    # 6) 平衡区突破/回收 + 持续（不反包）确认
     EQ_WIN = 20
-    EQ_BREAK_BUF = 0.003
-    EQ_REJ_BODY = 0.6
+    # 自适应阈值（随 ATR% 缩放）
+    atr_scale = max(0.7, min(1.3, atrp / EQ_ATR_REF))
+    EQ_BREAK_BUF = max(0.002, min(0.005, EQ_BREAK_BUF_BASE * (1.0 / atr_scale)))
+    EQ_MIN_BODY_PCT = max(
+        0.0025, min(0.0040, EQ_MIN_BODY_PCT_BASE * (1.0 / atr_scale))
+    )  # 0.25%~0.40%
+
     if len(df_closed) >= EQ_WIN + 2:
         eq_h = float(df_closed["high"].tail(EQ_WIN).max())
-        eq_l = (
-            float(df_closed()["low"].tail(EQ_WIN).min())
-            if False
-            else float(df_closed["low"].tail(EQ_WIN).min())
+        eq_l = float(df_closed["low"].tail(EQ_WIN).min())
+        body_pct_now_abs = abs(c - o) / max(o, 1e-12) * 100.0
+
+        break_up = (c >= eq_h * (1.0 + EQ_BREAK_BUF)) and (
+            body_pct_now_abs >= EQ_MIN_BODY_PCT * 100
         )
-        break_up = c >= eq_h * (1.0 + EQ_BREAK_BUF)
-        break_dn = c <= eq_l * (1.0 - EQ_BREAK_BUF)
+        break_dn = (c <= eq_l * (1.0 - EQ_BREAK_BUF)) and (
+            body_pct_now_abs >= EQ_MIN_BODY_PCT * 100
+        )
+
+        # 假突破回收：实体部分≥一定比例
+        EQ_REJ_BODY = 0.6
         reject_up = (
             (h > eq_h * (1.0 + EQ_BREAK_BUF))
             and (c <= eq_h)
@@ -1012,20 +1117,126 @@ def detect_signal(
             and (c >= eq_l)
             and (abs(o - c) / max(h - l, 1e-12) >= EQ_REJ_BODY)
         )
+
         if HTF_BULL:
             break_dn = reject_up = False
         if HTF_BEAR:
             break_up = reject_dn = False
-        if break_up or break_dn:
-            pro_kinds.append("equilibrium_break")
+
+        if break_up:
+            pro_kinds.append("equilibrium_break_up")
             pro_reasons.append(
-                f"equilibrium_break: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f}"
+                f"equilibrium_break_up: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%"
             )
-        if reject_up or reject_dn:
-            pro_kinds.append("equilibrium_reject")
+        if break_dn:
+            pro_kinds.append("equilibrium_break_down")
             pro_reasons.append(
-                f"equilibrium_reject: 假突破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
+                f"equilibrium_break_down: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%"
             )
+        if reject_up:
+            pro_kinds.append("equilibrium_reject_up")
+            pro_reasons.append(
+                f"equilibrium_reject_up: 假上破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
+            )
+        if reject_dn:
+            pro_kinds.append("equilibrium_reject_down")
+            pro_reasons.append(
+                f"equilibrium_reject_down: 假下破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
+            )
+
+        # ===== 新增：突破后 N 根内不反包（持续） =====
+        if len(df_closed) >= (EQ_WIN + EQ_PERSIST_N + 2):
+            closes = df_closed["close"].astype(float).values
+            opens = df_closed["open"].astype(float).values
+            highs = df_closed["high"].astype(float).values
+            lows = df_closed["low"].astype(float).values
+
+            # 滚动窗口的区间上下界
+            eq_h_series = pd.Series(highs).rolling(EQ_WIN).max().values
+            eq_l_series = pd.Series(lows).rolling(EQ_WIN).min().values
+
+            # 取最后 EQ_PERSIST_N+5 根做回顾，找“最近一次突破”的收盘位置 idx_b
+            lookback = min(EQ_PERSIST_N + 5, len(df_closed) - 2)
+            idx_end = len(df_closed) - 1
+            idx_start = idx_end - lookback
+            idx_b_up = None
+            idx_b_dn = None
+
+            for j in range(idx_end, idx_start - 1, -1):
+                if j < EQ_WIN:
+                    break
+                body_pct_j = abs(closes[j] - opens[j]) / max(opens[j], 1e-12) * 100.0
+                # 上破确认（修复 NaN 判断：用 pd.isna）
+                if (
+                    not pd.isna(eq_h_series[j])
+                    and closes[j] >= eq_h_series[j] * (1.0 + EQ_BREAK_BUF)
+                    and body_pct_j >= EQ_MIN_BODY_PCT * 100
+                ):
+                    idx_b_up = j
+                    break
+            for j in range(idx_end, idx_start - 1, -1):
+                if j < EQ_WIN:
+                    break
+                body_pct_j = abs(closes[j] - opens[j]) / max(opens[j], 1e-12) * 100.0
+                # 下破确认（修复 NaN 判断：用 pd.isna）
+                if (
+                    not pd.isna(eq_l_series[j])
+                    and closes[j] <= eq_l_series[j] * (1.0 - EQ_BREAK_BUF)
+                    and body_pct_j >= EQ_MIN_BODY_PCT * 100
+                ):
+                    idx_b_dn = j
+                    break
+
+            # 放宽“反包定义”：实体覆盖 ≥ 70% + 收盘越过中点
+            def bearish_engulf_relaxed(prev_open, prev_close, o1, c1) -> bool:
+                prev_low = min(prev_open, prev_close)
+                prev_high = max(prev_open, prev_close)
+                prev_mid = (prev_open + prev_close) / 2.0
+                covered = max(0.0, (o1 - c1)) >= 0.7 * max(
+                    1e-12, (prev_high - prev_low)
+                )
+                return (o1 > prev_high) and (c1 < prev_mid) and covered
+
+            def bullish_engulf_relaxed(prev_open, prev_close, o1, c1) -> bool:
+                prev_low = min(prev_open, prev_close)
+                prev_high = max(prev_open, prev_close)
+                prev_mid = (prev_open + prev_close) / 2.0
+                covered = max(0.0, (c1 - o1)) >= 0.7 * max(
+                    1e-12, (prev_high - prev_low)
+                )
+                return (o1 < prev_low) and (c1 > prev_mid) and covered
+
+            # 检查上破后的 N 根
+            if idx_b_up is not None and not HTF_BEAR:
+                ok = True
+                end_chk = min(idx_b_up + EQ_PERSIST_N, len(df_closed) - 1)
+                for j in range(idx_b_up + 1, end_chk + 1):
+                    if bearish_engulf_relaxed(
+                        opens[idx_b_up], closes[idx_b_up], opens[j], closes[j]
+                    ):
+                        ok = False
+                        break
+                if ok:
+                    pro_kinds.append("equilibrium_persist_up")
+                    pro_reasons.append(
+                        f"equilibrium_persist_up: 上破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)"
+                    )
+
+            # 检查下破后的 N 根
+            if idx_b_dn is not None and not HTF_BULL:
+                ok = True
+                end_chk = min(idx_b_dn + EQ_PERSIST_N, len(df_closed) - 1)
+                for j in range(idx_b_dn + 1, end_chk + 1):
+                    if bullish_engulf_relaxed(
+                        opens[idx_b_dn], closes[idx_b_dn], opens[j], closes[j]
+                    ):
+                        ok = False
+                        break
+                if ok:
+                    pro_kinds.append("equilibrium_persist_down")
+                    pro_reasons.append(
+                        f"equilibrium_persist_down: 下破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)"
+                    )
 
     # ===== 聚合：Base + Pro → 候选清单 =====
     candidates: List[Tuple[str, List[str]]] = []
@@ -1054,7 +1265,7 @@ def detect_signal(
 
     # Pro（附带理由）
     for k in pro_kinds:
-        candidates.append((k, pro_reasons))  # 同一组理由共享
+        candidates.append((k, pro_reasons))
 
     if not candidates:
         dbg(
@@ -1076,8 +1287,12 @@ def detect_signal(
         "explode_down": 0.15,
         "trend_break_up": 0.12,
         "trend_break_down": 0.12,
-        "equilibrium_break": 0.12,
-        "equilibrium_reject": 0.12,
+        "equilibrium_break_up": 0.12,
+        "equilibrium_break_down": 0.12,
+        "equilibrium_reject_up": 0.12,
+        "equilibrium_reject_down": 0.12,
+        "equilibrium_persist_up": 0.13,
+        "equilibrium_persist_down": 0.13,
         "volume_shift_long": 0.10,
         "volume_shift_short": 0.10,
         "ema_stack_bull": 0.08,
@@ -1090,8 +1305,12 @@ def detect_signal(
     priority = {
         "trend_break_up": 0,
         "trend_break_down": 0,
-        "equilibrium_break": 1,
-        "equilibrium_reject": 1,
+        "equilibrium_break_up": 1,
+        "equilibrium_break_down": 1,
+        "equilibrium_reject_up": 1,
+        "equilibrium_reject_down": 1,
+        "equilibrium_persist_up": 1,
+        "equilibrium_persist_down": 1,
         "ema_stack_bull": 2,
         "ema_stack_bear": 2,
         "ema_rebound_long": 2,
@@ -1128,21 +1347,13 @@ def detect_signal(
     level = "HARD" if MODE == "QUIET" else "MEDIUM"
     SHADOW = False  # 观察期使用 True；要拦截则改 False
 
-    # 为每个候选构建“核心说明”，并过 Guard
     evaluated = []
     for kind, extra_reasons in candidates:
         side = (
             "long"
-            if (
-                "_up" in kind
-                or "bull" in kind
-                or "long" in kind
-                or "bottom" in kind
-                or (kind == "equilibrium_break" and HTF_BULL)
-            )
+            if ("_up" in kind or "bull" in kind or "long" in kind or "bottom" in kind)
             else "short"
         )
-        # 评分
         sc = (
             W_VOLR_NOW * max(0.0, min(1.0, (volr_now - 1.0) / 4.0))
             + W_EQ_NOW_USD
@@ -1156,20 +1367,18 @@ def detect_signal(
             )
         ) + base_bonus.get(kind, 0.0)
 
-        # 趋势文字（统一）
         tr2 = trend_scores(df_closed, bars=TREND_LOOKBACK_BARS)
         adx2 = last_adx(df_closed, period=14)
         atrp2 = last_atr_pct(df_closed, period=14)
         trend_text = f"Class={SYMBOL_CLASS.get(symbol, '?')} | ADX≈{adx2:.1f}, ρ={tr2['spearman']:.2f}, net%={tr2['net_pct']:.2f}, ATR%≈{atrp2:.2f} | HTF:{'BULL' if HTF_BULL else ('BEAR' if HTF_BEAR else '—')}"
 
-        # 文案 reasons
         reasons = [f"class={SYMBOL_CLASS.get(symbol, '?')}; mode={MODE}"]
         if HTF_BULL:
             reasons.append("HTF=15m/1h 多头闸门")
         if HTF_BEAR:
             reasons.append("HTF=15m/1h 空头闸门")
-        reasons += extra_reasons  # pro 的简述
-        # base 的详述（尽可能简洁）
+        reasons += extra_reasons
+        # base 的简述
         if kind == "explode_up":
             reasons += [
                 f"explode_up: volr {volr_now:.2f}≥{EXP_VOLR:.2f}",
@@ -1182,59 +1391,12 @@ def detect_signal(
                 f"pct_now {pct_now:.2f}%≤{min(NO_FOLLOW_UP_TH, PRICE_DN_TH):.2f}%",
                 f"struct c≤LLV({BO_WINDOW})+tol",
             ]
+            last_up_ts = LAST_EXPLODE_UP.get(symbol)
             if last_up_ts and (int(time.time()) - last_up_ts < EXPLODE_LOCK_MIN):
                 reasons.append(
                     f"post-explode lock checked: {int(time.time()) - last_up_ts}s"
                 )
-        elif kind == "pullback_long":
-            dist_hi = (
-                float(df_closed["high"].tail(PB_LOOKBACK_HI).max() - c)
-                / max(c, 1e-12)
-                * 100.0
-            )
-            reasons += [
-                f"pullback_long: dist_HH({PB_LOOKBACK_HI}) {dist_hi:.2f}%≥{PB_HI_PCT_dyn:.2f}%",
-                f"RSI {rsi:.1f}≤{PB_RSI_TH} 或 W%R {wr:.1f}≤{PB_WR_TH}",
-                f"bounce {pct_now:.2f}%≥{PB_MIN_BOUNCE_PCT_dyn:.2f}%",
-            ]
-        elif kind == "pullback_short":
-            dist_lo = (
-                float(c - df_closed["low"].tail(PB_LOOKBACK_HI).min())
-                / max(c, 1e-12)
-                * 100.0
-            )
-            reasons += [
-                f"pullback_short: dist_LL({PB_LOOKBACK_HI}) {dist_lo:.2f}%≥{PB_HI_PCT_dyn:.2f}%",
-                f"RSI {rsi:.1f}≥{100 - PB_RSI_TH} 或 W%R {wr:.1f}≥{-100 - PB_WR_TH}",
-                f"bounce {pct_now:.2f}%≤{-PB_MIN_BOUNCE_PCT_dyn:.2f}%",
-            ]
-        elif kind == "cap_long":
-            reasons += [
-                f"cap_long: wick_low≥{CAPW_dyn:.2f}, volr {volr_now:.2f}≥{max(2.0, CAPV_dyn * 0.95):.2f}"
-            ]
-        elif kind == "cap_short":
-            reasons += [
-                f"cap_short: wick_high≥{CAPW_dyn:.2f}, volr {volr_now:.2f}≥{max(2.0, CAPV_dyn * 0.95):.2f}"
-            ]
-        elif kind == "ema_rebound_long":
-            reasons += [
-                f"ema_rebound_long: EMA20≥EMA50 & cross_up EMA8 ; volr {volr_now:.2f}≥{max(1.25, EXP_VOLR * 0.5):.2f}"
-            ]
-        elif kind == "ema_rebound_short":
-            reasons += [
-                f"ema_rebound_short: EMA20≤EMA50 & cross_down EMA8 ; volr {volr_now:.2f}≥{max(1.25, EXP_VOLR * 0.5):.2f}"
-            ]
-        elif "bb_squeeze" in kind and pd.notna(bb_width):
-            if "long" in kind:
-                reasons += [
-                    f"bb_squeeze_long: width={bb_width:.3%}≤1.50% & c≈≥Upper ; volr {volr_now:.2f}≥{max(1.6, EXP_VOLR * 0.6):.2f}"
-                ]
-            else:
-                reasons += [
-                    f"bb_squeeze_short: width={bb_width:.3%}≤1.50% & c≈≤Lower ; volr {volr_now:.2f}≥{max(1.6, EXP_VOLR * 0.6):.2f}"
-                ]
 
-        # Entry/TP/SL（与原保持一致）
         entry_safe = conservative_entry(
             "NA",
             side,
@@ -1258,10 +1420,10 @@ def detect_signal(
             else f"/forceshort {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
         )
 
-        # Guard 评估（统一）
         block, reasons_guard, votes, need_votes = _eval_guard(
             kind,
             side,
+            symbol=symbol,
             elapsed=elapsed,
             BAR_SEC=BAR_SEC,
             body_pct=body_pct_now,
@@ -1271,7 +1433,7 @@ def detect_signal(
             day_high=day_high,
             day_low=day_low,
             level=level,
-            shadow=SHADOW,
+            shadow=False,
             volr_now=volr_now,
             adx_val=adx,
             htf_bull=HTF_BULL,
@@ -1280,16 +1442,14 @@ def detect_signal(
             if "bb_squeeze" in kind and pd.notna(bb_width)
             else None,
         )
-        status = "SHADOW" if SHADOW else ("BLOCK" if block else "PASS")
+        status = "BLOCK" if block else "PASS"
         dbg(
             f"[GUARD {status}] {symbol} {kind} votes={votes}/{need_votes} reasons={reasons_guard}"
         )
 
-        # 影子模式：不过滤；实拦模式：过滤
-        if (not SHADOW) and block:
+        if block:
             continue
 
-        # 汇总“文本核心”
         reasons_show = reasons if PRINT_FULL_REASONS else reasons[:MAX_REASONS_IN_MSG]
         text_core = [
             f"Symbol: <b>{symbol}</b>",
@@ -1335,6 +1495,9 @@ def detect_signal(
     text_core = best["text_core"]
     trend_text = best["trend_text"]
 
+    # —— 结构化的 HTF 状态 —— #
+    htf_gate = "BULL" if HTF_BULL else ("BEAR" if HTF_BEAR else "")
+
     payload = {
         "symbol": symbol,
         "kind": kind,
@@ -1347,22 +1510,31 @@ def detect_signal(
         "vps_base": float(vps_base),
         "eq_base_bar_usd": float(eq_base_bar_usd),
         "eq_now_bar_usd": float(eq_now_bar_usd),
+        # —— HTF 相关（新增）——
+        "htf_gate": htf_gate,  # "BULL" / "BEAR" / ""（formatter可直接用）
+        "htf_bull": bool(HTF_BULL),  # 可选：布尔
+        "htf_bear": bool(HTF_BEAR),  # 可选：布尔
+        # 兼容旧模板：保留 trend_text（人读友好）
+        "trend_text": trend_text,
+        # —— 触发原因（新增：给 formatter 用）——
+        # 注意：reasons_show 已在上文构建（受 PRINT_FULL_REASONS / MAX_REASONS_IN_MSG 控制）
+        "reasons": reasons_show,
         "trend_align": bool(
             (HTF_BULL and side == "long") or (HTF_BEAR and side == "short")
         ),
-        "trend_text": trend_text,
-        "text_core": text_core,
+        "text_core": text_core,  # 保持原有长文描述
         "score": float(sc),
-        "reasons": [],  # 详细原因已在 text_core 中；如需原始列表可扩展
+        # 日内信息
         "day_high": day_high,
         "day_low": day_low,
         "pct24": pct24,
         "dist_day_high_pct": dist_day_high_pct,
         "dist_day_low_pct": dist_day_low_pct,
         "last_price": last_price or c,
+        # 命令
         "cmd_safe": best["cmd_safe"],
     }
-    if not SAFE_MODE_ALWAYS and best["cmd_immd"] is not None:
+    if not SAFE_MODE_ALWAYS and best.get("cmd_immd") is not None:
         payload["cmd_immd"] = best["cmd_immd"]
 
     return True, payload
