@@ -1,22 +1,16 @@
 # -*- coding: utf-8 -*-
 """
-detect.py  (Fused, patched)
+detect.py  (Fused, patched + SR)
 —— Base 信号 + Pro 扩展信号，统一进入 ChaseGuard 多数表决
-要点：
-- 保留原 Base 五类：explode / pullback / capitulation / ema_rebound / bb_squeeze
-- 增加 Pro 六类：trend_break_* / volume_shift_* / ema_stack_* / rsi_div_* / climax_* / equilibrium_*
-- 新增 Pro 扩展：equilibrium_persist_up/down（平衡区突破后 N 根内不反包）
-- Guard 只看“信号本身与环境”票据：不再用 RR 作为票据
-- 新票据：最低量能 VolR、HTF 趋势错位、动量豁免收紧(仅当 volr>=2.2 & ADX>=18)、扁平无量、squeeze 带宽过宽
-- MODE=QUIET → 使用 HARD 档；否则 MEDIUM 档；可通过 strategy.overrides 覆盖细项
-- （本版补丁）
-  · 修复 equilibrium_persist_* NaN 判断 & 放宽反包定义
-  · 结构类票数 3→2，ema_stack_* 候选前置硬条件 + 35min 冷却
-  · RSI 背离放宽容差，HTF 不再直接禁（交由 Guard）
-  · climax_* 轻度放宽
-  · Guard: VolR 阈值按 ADX 自适应；ema_stack_* 的 flat & no volume 不计票；
-    对回踩/反弹类放宽“接近日内极值”的票据
-  · CLASS_ADJ：按 SYMBOL_CLASS 自适应（MEGA/GOLD 放宽量能等）
+新增：
+- [ADD SR] 统一在 detect_signal 内生成 SR 上下文（优先 1h，退化当前周期），并加入 payload
+- [ADD SR] Guard 里加入 SR 票据（贴近阻力/支撑各 +1 票；cap/climax 远离关键位再 +1 票）
+修复：
+- [FIX] cmd_immd 取值错误（索引错位）
+- [FIX] MIN_EQBAR 覆盖顺序（符号级阈值优先生效）
+- [FIX] Pro reasons 串味（共享同一列表）
+- [FIX] SHADOW 参数未生效
+- [FIX] explode_up 锁只在最终选中时记录 → 改为“产生候选即记录”
 """
 
 import time
@@ -202,14 +196,271 @@ def _kind_cn(kind: str) -> str:
 
 
 # =========================
+# [ADD SR] 计算 SR 上下文（不重复取 K 线）
+# =========================
+def _sr_context_from_df(df: pd.DataFrame, current: float, topn: int = 6) -> dict:
+    import numpy as np
+    import pandas as pd
+
+    def _swing_points(df_, window=2):
+        highs, lows = df_["high"].values, df_["low"].values
+        R, S = [], []
+        n = len(df_)
+        for i in range(window, n - window):
+            if highs[i] >= np.max(highs[i - window : i + window + 1]):
+                R.append((i, float(highs[i])))
+            if lows[i] <= np.min(lows[i - window : i + window + 1]):
+                S.append((i, float(lows[i])))
+        return R, S
+
+    def _cluster_levels(points, band_abs, n_total):
+        if not points:
+            return []
+        pts = sorted(points, key=lambda x: x[1])
+        clusters, cur = [], [pts[0]]
+        for p in pts[1:]:
+            if abs(p[1] - np.mean([x[1] for x in cur])) <= band_abs:
+                cur.append(p)
+            else:
+                clusters.append(cur)
+                cur = [p]
+        clusters.append(cur)
+        lvls = []
+        for c in clusters:
+            prices = [x[1] for x in c]
+            idxs = [x[0] for x in c]
+            price = float(np.mean(prices))
+            touches = len(c)
+            recency = 0.5 * (max(idxs) / (n_total - 1)) if n_total > 1 else 0.0
+            lvls.append(
+                {
+                    "price": price,
+                    "touches": touches,
+                    "last_idx": max(idxs),
+                    "score": touches + recency,
+                }
+            )
+        lvls.sort(key=lambda x: (x["score"], x["touches"]), reverse=True)
+        return lvls
+
+    def _enforce_spacing(sorted_lvls, min_gap_abs, reverse=False):
+        """
+        在已排序的价位序列上强制最小间距：
+        - reverse=False 表示升序（阻力）
+        - reverse=True  表示降序（支撑）
+        """
+        if not sorted_lvls:
+            return []
+        kept = []
+        last_price = None
+        for node in sorted_lvls:
+            p = float(node["price"])
+            if last_price is None or (abs(p - last_price) >= min_gap_abs):
+                kept.append(node)
+                last_price = p
+        # 再次扫一遍，确保相邻满足间距（极端情况下多源合并后仍可能相近）
+        out = [kept[0]]
+        for node in kept[1:]:
+            if abs(float(node["price"]) - float(out[-1]["price"])) >= min_gap_abs:
+                out.append(node)
+        return out
+
+    def _densify_support_by_hist(lows, current_, band_abs, needed):
+        arr = np.array([x for x in lows if x <= current_])
+        if len(arr) == 0 or needed <= 0:
+            return []
+        lo, hi = arr.min(), current_
+        bins = max(8, int((hi - lo) / max(1e-12, band_abs)))
+        bins = min(bins, 200)
+        hist, edges = np.histogram(arr, bins=bins, range=(lo, hi))
+        centers = (edges[:-1] + edges[1:]) / 2.0
+        idxs = np.argsort(-hist)
+        out = []
+        for k in idxs[:needed]:
+            if hist[k] <= 0:
+                continue
+            out.append(
+                {
+                    "price": float(centers[k]),
+                    "touches": int(hist[k]),
+                    "last_idx": 0,
+                    "score": float(hist[k]),
+                }
+            )
+        out_sorted = sorted(out, key=lambda x: x["price"])
+        # 合并过近的柱心
+        merged = []
+        for node in out_sorted:
+            if not merged or abs(node["price"] - merged[-1]["price"]) > band_abs:
+                merged.append(node)
+            else:
+                prev = merged[-1]
+                merged[-1] = {
+                    "price": (prev["price"] + node["price"]) / 2.0,
+                    "touches": prev["touches"] + node["touches"],
+                    "last_idx": max(prev["last_idx"], node["last_idx"]),
+                    "score": prev["score"] + node["score"],
+                }
+        merged.sort(key=lambda x: (x["score"], x["touches"]), reverse=True)
+        return merged[:needed]
+
+    def _fib_extend(side: str, anchor_price: float, step_ref: float, count: int):
+        """
+        斐波那契延展：
+        - side='R'（向上）：anchor + step*ratio
+        - side='S'（向下）：anchor - step*ratio
+        """
+        F = [1.272, 1.414, 1.618, 2.0, 2.618, 3.618]
+        out = []
+        for r in F:
+            if side == "R":
+                p = anchor_price + step_ref * r
+            else:
+                p = anchor_price - step_ref * r
+            out.append(
+                {
+                    "price": float(p),
+                    "touches": 0,
+                    "last_idx": len(df) - 1,
+                    "score": 0.0,
+                    "ext": True,
+                }
+            )
+            if len(out) >= count:
+                break
+        return out
+
+    # —— 自适应带宽与最小间距 —— #
+    high, low, close = df["high"].values, df["low"].values, df["close"].values
+    if len(close) < 2:
+        return {}
+    hl = high - low
+    hc = np.abs(high[1:] - close[:-1])
+    lc = np.abs(low[1:] - close[:-1])
+    tr = np.maximum(hl[1:], np.maximum(hc, lc))
+    atr = float(pd.Series(tr).rolling(14, min_periods=1).mean().iloc[-1])
+
+    band_abs = max(atr * 0.25, current * 0.002)
+    # 你要“考虑空间”，这里用更强的最小间距（>= band_abs 的 1.0 倍，再与价格千分之二取大）
+    min_gap_abs = max(band_abs, current * 0.002)
+
+    # —— 基于摆动点聚类 —— #
+    R_pts, S_pts = _swing_points(df, window=2)
+    R_all = _cluster_levels(R_pts, band_abs, len(df))
+    S_all = _cluster_levels(S_pts, band_abs, len(df))
+
+    # —— 分上/下（相对 current） —— #
+    R_above = [x for x in R_all if x["price"] >= current]
+    S_below = [x for x in S_all if x["price"] <= current]
+
+    # —— 如果支撑侧太少，做 histogram densify（仍在 current 下方） —— #
+    if len(S_below) < topn:
+        need = topn - len(S_below)
+        extra = _densify_support_by_hist(
+            df["low"].values.astype(float), current, band_abs, need
+        )
+        # 避免与已有点过近
+        for e in extra:
+            if all(abs(e["price"] - s["price"]) > band_abs for s in S_below):
+                S_below.append(e)
+
+    # —— 初步排序 & 截断 —— #
+    R_out = sorted(R_above, key=lambda x: x["price"])[
+        : (topn * 2)
+    ]  # 放宽，待会做间距筛
+    S_out = sorted(S_below, key=lambda x: x["price"], reverse=True)[: (topn * 2)]
+
+    # —— 强制最小间距（考虑空间） —— #
+    R_out = _enforce_spacing(R_out, min_gap_abs, reverse=False)
+    S_out = _enforce_spacing(S_out, min_gap_abs, reverse=True)
+
+    # —— 单边行情：不足两点 → 斐波那契延展（基于另一侧已得到的点位尺度） —— #
+    # 参考步长（step_ref）：优先用另一侧最近两个点的“层间距”；若只有一个，则用 |current-该点|；都没有就退化用 max(band_abs, atr, current*0.005)
+    def _step_ref_from_other(other_levels, side_for_ref: str):
+        if len(other_levels) >= 2:
+            return abs(other_levels[0]["price"] - other_levels[1]["price"])
+        elif len(other_levels) == 1:
+            return max(band_abs, abs(current - other_levels[0]["price"]))
+        else:
+            return max(band_abs, atr, current * 0.005)
+
+    # 扩展阻力（向上）
+    if len(R_out) < 2:
+        anchor = R_out[-1]["price"] if R_out else current
+        step_ref = _step_ref_from_other(S_out, "S")
+        ext_need = max(0, 2 - len(R_out)) + (topn - len(R_out))
+        ext = _fib_extend("R", anchor, step_ref, max(2, ext_need))
+        # 只要 > current，且与已有保持最小间距
+        cand = sorted(
+            [x for x in ext if x["price"] > current], key=lambda x: x["price"]
+        )
+        for node in cand:
+            if all(abs(node["price"] - r["price"]) >= min_gap_abs for r in R_out):
+                R_out.append(node)
+                if len(R_out) >= topn:
+                    break
+        R_out = sorted(R_out, key=lambda x: x["price"])[:topn]
+
+    # 扩展支撑（向下）
+    if len(S_out) < 2:
+        anchor = S_out[-1]["price"] if S_out else current
+        step_ref = _step_ref_from_other(R_out, "R")
+        ext_need = max(0, 2 - len(S_out)) + (topn - len(S_out))
+        ext = _fib_extend("S", anchor, step_ref, max(2, ext_need))
+        cand = sorted(
+            [x for x in ext if x["price"] < current],
+            key=lambda x: x["price"],
+            reverse=True,
+        )
+        for node in cand:
+            if all(abs(node["price"] - s["price"]) >= min_gap_abs for s in S_out):
+                S_out.append(node)
+                if len(S_out) >= topn:
+                    break
+        S_out = sorted(S_out, key=lambda x: x["price"], reverse=True)[:topn]
+
+    # —— 取最近位与到位百分比 —— #
+    near_R = next(
+        (x for x in sorted(R_out, key=lambda z: z["price"]) if x["price"] >= current),
+        None,
+    )
+    near_S = next(
+        (
+            x
+            for x in sorted(S_out, key=lambda z: z["price"], reverse=True)
+            if x["price"] <= current
+        ),
+        None,
+    )
+
+    def _gap_pct(p):
+        return (
+            None
+            if (p is None or current <= 0)
+            else abs(p["price"] - current) / current * 100.0
+        )
+
+    return {
+        "band_abs": float(band_abs),
+        "near_resistance": (near_R["price"] if near_R else None),
+        "near_support": (near_S["price"] if near_S else None),
+        "dist_to_resistance_pct": _gap_pct(near_R),
+        "dist_to_support_pct": _gap_pct(near_S),
+        # 注意：已经做了“空间最小间距”与“必要时的斐波延展”
+        "R_levels": sorted(R_out, key=lambda x: x["price"])[:topn],
+        "S_levels": sorted(S_out, key=lambda x: x["price"], reverse=True)[:topn],
+    }
+
+
+# =========================
 # Guard：分级 + 多数表决（无 RR 票据）
 # =========================
 _GUARD_STATS = defaultdict(int)
 
 STRICT_DEFAULTS = {
-    "NO_CHASE_DAYEXT_GAP_PCT": 1.0,  # 接近日内高/低的最小安全距离%
-    "NO_CHASE_EMA20_PREMIUM_PCT": 2.0,  # EMA20 溢价（价偏离）
-    "CLOSE_CONFIRM_FRAC": 0.60,  # 强势类需收盘确认比例
+    "NO_CHASE_DAYEXT_GAP_PCT": 1.0,
+    "NO_CHASE_EMA20_PREMIUM_PCT": 2.0,
+    "CLOSE_CONFIRM_FRAC": 0.60,
     "MAX_BODY_FOR_LONG": 2.5,
     "MAX_BODY_FOR_SHORT": 2.5,
     "SKIP_LONG_NEAR_DHIGH_FOR": [
@@ -236,6 +487,10 @@ STRICT_DEFAULTS = {
     ],
     "RSI_CAP_LONG": 68,
     "RSI_CAP_SHORT": 32,
+    # [ADD SR]—— SR 相关默认阈值（可按 overrides 进一步细化）
+    "SR_GAP_NEAR_R_PCT": 0.8,  # 多单离最近阻力 < 0.8% → +1 票
+    "SR_GAP_NEAR_S_PCT": 0.8,  # 空单离最近支撑 < 0.8% → +1 票
+    "SR_BIND_CAP_PCT": 1.2,  # cap/climax 需贴关键位 ≤1.2%（远离 → +1 票）
 }
 
 GUARD_LEVELS = {
@@ -275,15 +530,12 @@ GUARD_LEVELS = {
 
 # 某些信号需要更高/更低 VolR 底线（种类修正）
 MIN_VOLR_BY_KIND = {
-    # 收紧：确认类需要更扎实量能
     "ema_stack_bull": 1.8,
     "ema_stack_bear": 1.8,
-    # 保持原值
     "volume_shift_long": 1.6,
     "volume_shift_short": 1.6,
     "bb_squeeze_long": 1.6,
     "bb_squeeze_short": 1.6,
-    # 放宽：结构类允许稍低量能（以免两票秒拦）
     "equilibrium_break_up": 1.3,
     "equilibrium_break_down": 1.3,
     "equilibrium_reject_up": 1.3,
@@ -294,7 +546,6 @@ MIN_VOLR_BY_KIND = {
     "trend_break_down": 1.4,
 }
 
-# 提高部分“易泛滥信号”的票数门槛（结构类 3 -> 2）
 VOTES_NEED_BY_KIND = {
     "volume_shift_long": 2,
     "volume_shift_short": 2,
@@ -310,10 +561,9 @@ VOTES_NEED_BY_KIND = {
     "trend_break_down": 2,
 }
 
-# === Symbol-class adjustments (optional) ===
 CLASS_ADJ = {
-    "MEGA": dict(volr_scale=0.85, gap_add=+0.2, need_close_add=0),  # BTC/ETH/DOGE
-    "GOLD": dict(volr_scale=0.80, gap_add=+0.3, need_close_add=0),  # PAXG/金锚品
+    "MEGA": dict(volr_scale=0.85, gap_add=+0.2, need_close_add=0),
+    "GOLD": dict(volr_scale=0.80, gap_add=+0.3, need_close_add=0),
     "ALTS": dict(volr_scale=1.00, gap_add=0.0, need_close_add=0.00),
     "MICRO": dict(volr_scale=1.10, gap_add=-0.2, need_close_add=0),
 }
@@ -323,7 +573,7 @@ def _eval_guard(
     kind: str,
     side: str,  # "long"/"short"
     *,
-    symbol: str,  # <— 新增：用于类目自适应
+    symbol: str,
     elapsed: int,
     BAR_SEC: int,
     body_pct: float,
@@ -334,12 +584,14 @@ def _eval_guard(
     day_low: float | None,
     level: str = "MEDIUM",
     shadow: bool = False,
-    # 新增用于票据的上下文
     volr_now: float = 1.0,
     adx_val: float = 0.0,
     htf_bull: bool = False,
     htf_bear: bool = False,
     squeeze_width: float | None = None,
+    # [ADD SR]
+    sr_dist_to_resistance_pct: float | None = None,
+    sr_dist_to_support_pct: float | None = None,
 ):
     """
     Guard 内部做“类目自适应”而不污染全局 GUARD_LEVELS。
@@ -359,7 +611,7 @@ def _eval_guard(
     votes = 0
     reasons: List[str] = []
 
-    # 1) 收盘确认（强波动/追价风险类）
+    # 1) 收盘确认
     need_close = kind in (
         "explode_up",
         "explode_down",
@@ -386,12 +638,12 @@ def _eval_guard(
         votes += 1
         reasons.append(f"close<{int(P['need_close_frac'] * 100)}%")
 
-    # 2) 实体过大拒绝（避免追大阳/大阴）
+    # 2) 实体过大
     if body_pct > P["max_body"]:
         votes += 1
         reasons.append(f"body>{P['max_body']}%")
 
-    # 3) 接近日内极值（不追高/不抄底）——对回踩/反弹类放宽
+    # 3) 接近日内极值（回踩/反弹类放宽）
     NEAR_CAP_FOR_LONG = STRICT_DEFAULTS["SKIP_LONG_NEAR_DHIGH_FOR"]
     NEAR_CAP_FOR_SHORT = STRICT_DEFAULTS["SKIP_SHORT_NEAR_DLOW_FOR"]
     relax_for = {
@@ -421,11 +673,11 @@ def _eval_guard(
                 votes += 1
                 reasons.append(f"nearDLow<{P['gap_pct']}%")
 
-    # 4) EMA20 溢价限制 + 动量豁免收紧
+    # 4) EMA20 溢价限制 + 动量豁免
     prem = None
     if ema20_val is not None and not pd.isna(ema20_val) and ema20_val > 0:
         prem = (c / ema20_val - 1.0) * 100.0
-        momo_exempt = volr_now >= 2.2 and adx_val >= 18.0  # 仅强动量才豁免
+        momo_exempt = volr_now >= 2.2 and adx_val >= 18.0
 
         def _ema_soft_vote_allowed(kind_: str) -> bool:
             return (
@@ -451,13 +703,13 @@ def _eval_guard(
 
     # 5) 量能底线（档位 + 种类修正 + ADX 自适应）
     base_min = max(P["min_volr"], MIN_VOLR_BY_KIND.get(kind, 0.0))
-    adj_adx = np.clip((18.0 - adx_val) * 0.02, -0.3, 0.4)  # ADX 高→门槛降，低→升
+    adj_adx = np.clip((18.0 - adx_val) * 0.02, -0.3, 0.4)
     min_volr_need = max(1.2, base_min + adj_adx)
     if volr_now < min_volr_need:
         votes += 1
         reasons.append(f"VolR<{min_volr_need:.1f}x")
 
-    # 6) 趋势闸门错位（与 HTF 相反向）——reject 不施加
+    # 6) 趋势闸门错位
     if not kind.startswith("cap_") and "equilibrium_reject" not in kind:
         if side == "long" and htf_bear:
             votes += 1
@@ -478,7 +730,7 @@ def _eval_guard(
 
     # 8) squeeze 带宽过宽
     if "bb_squeeze" in kind and (squeeze_width is not None):
-        if squeeze_width > 0.018:  # 1.8%
+        if squeeze_width > 0.018:
             votes += 1
             reasons.append("squeeze range too wide")
 
@@ -494,6 +746,34 @@ def _eval_guard(
             if kind == "ema_stack_bear" and rsi <= 32:
                 votes += 1
                 reasons.append("RSI<32 (oversold)")
+
+    # [ADD SR] 10) SR 接近票据（与“接近日内极值”同风格）
+    if side == "long" and sr_dist_to_resistance_pct is not None:
+        if sr_dist_to_resistance_pct < STRICT_DEFAULTS["SR_GAP_NEAR_R_PCT"]:
+            votes += 1
+            reasons.append(f"nearSR_R<{STRICT_DEFAULTS['SR_GAP_NEAR_R_PCT']:.1f}%")
+    if side == "short" and sr_dist_to_support_pct is not None:
+        if sr_dist_to_support_pct < STRICT_DEFAULTS["SR_GAP_NEAR_S_PCT"]:
+            votes += 1
+            reasons.append(f"nearSR_S<{STRICT_DEFAULTS['SR_GAP_NEAR_S_PCT']:.1f}%")
+
+    # [ADD SR] 11) 抄底/抄顶需贴关键位（cap/climax 远离关键位 → 加票）
+    if kind in ("cap_long", "climax_bottom"):
+        if (
+            sr_dist_to_support_pct is None
+            or sr_dist_to_support_pct > STRICT_DEFAULTS["SR_BIND_CAP_PCT"]
+        ):
+            votes += 1
+            reasons.append(f"farFromSupport>{STRICT_DEFAULTS['SR_BIND_CAP_PCT']:.1f}%")
+    if kind in ("cap_short", "climax_top"):
+        if (
+            sr_dist_to_resistance_pct is None
+            or sr_dist_to_resistance_pct > STRICT_DEFAULTS["SR_BIND_CAP_PCT"]
+        ):
+            votes += 1
+            reasons.append(
+                f"farFromResistance>{STRICT_DEFAULTS['SR_BIND_CAP_PCT']:.1f}%"
+            )
 
     need_votes = max(P["votes_need"], VOTES_NEED_BY_KIND.get(kind, P["votes_need"]))
     block = votes >= need_votes
@@ -519,19 +799,10 @@ def detect_signal(
     strong_dn_map: dict,
     strategy: Strategy,
 ):
-    """
-    统一检测：产生 Base+Pro 的所有候选 kind，计算 score & reasons，
-    进入 Guard 多数表决后，按优先级+评分选 1 个最佳 payload 返回。
-    """
     TIMEFRAME_FAST = strategy.timeframe_fast
     BAR_SEC = FRAME_SEC[TIMEFRAME_FAST]
 
-    # 策略可覆盖量能阈值与评分标尺
-    MIN_EQBAR = (
-        strategy.overrides.get("MIN_QV5M_USD", MIN_QV5M_USD)
-        if strategy.overrides
-        else MIN_QV5M_USD
-    )
+    # —— 策略覆盖项 —— #
     W_VOLR_NOW = strategy.w_volr_now
     W_EQ_NOW_USD = strategy.w_eq_now_usd
     W_ABS_PCT = strategy.w_abs_pct
@@ -561,7 +832,7 @@ def detect_signal(
     vol = float(cur["volume"])
     cur_open_ts = int(cur["ts"]) // 1000
     now_ts = int(time.time())
-    elapsed = max(1, min(BAR_SEC, now_ts - cur_open_ts))  # 本bar已进行秒数
+    elapsed = max(1, min(BAR_SEC, now_ts - cur_open_ts))
     vps_now = vol / elapsed
 
     recent_closed = df_closed.tail(BASELINE_BARS).copy()
@@ -574,8 +845,16 @@ def detect_signal(
     eq_base_bar_usd = vps_base * BAR_SEC * c
     eq_now_bar_usd = vps_now * BAR_SEC * c
 
-    # 最低等效额
-    if eq_now_bar_usd < MIN_EQBAR:
+    # [FIX] MIN_EQBAR 覆盖顺序（符号级优先）
+    Pm = resolve_params_for_symbol(symbol)
+    MIN_EQBAR_eff = (
+        strategy.overrides.get("MIN_QV5M_USD", MIN_QV5M_USD)
+        if strategy.overrides
+        else MIN_QV5M_USD
+    )
+    MIN_EQBAR_eff = Pm.get("MIN_QV5M_USD", MIN_EQBAR_eff)
+
+    if eq_now_bar_usd < MIN_EQBAR_eff:
         return False, None
 
     # 趋势与波动
@@ -629,6 +908,7 @@ def detect_signal(
         )
     except Exception:
         ema20_1h = ema50_1h = np.nan
+        df_1h = None
 
     HTF_BULL = (
         pd.notna(ema20_15)
@@ -654,11 +934,9 @@ def detect_signal(
     # ===== Base: explode / pullback / cap / ema_rebound / bb_squeeze =====
     pct_now = percent_change(c, o)
 
-    Pm = resolve_params_for_symbol(symbol)
     EXP_VOLR = Pm["EXPLODE_VOLR"]
     UP_TH = Pm["PRICE_UP_TH"]
     PB_HI_PCT = Pm["PB_LOOKBACK_HI_PCT"]
-    MIN_EQBAR = Pm["MIN_QV5M_USD"]  # 名称沿用
 
     # explode
     explode_up = (volr_now >= EXP_VOLR) and (pct_now >= UP_TH)
@@ -890,8 +1168,7 @@ def detect_signal(
         explode_down = pullback_short = ema_rebound_short = bb_reversal_short = False
 
     # ===== Pro: trend_break / volume_shift / ema_stack / rsi_div / climax / equilibrium =====
-    pro_kinds: List[str] = []
-    pro_reasons: List[str] = []
+    pro_reason_map: List[Tuple[str, str]] = []  # [FIX] 每种信号独立理由
 
     def _poly_slope(arr):
         x = np.arange(len(arr))
@@ -900,7 +1177,6 @@ def detect_signal(
         except Exception:
             return 0.0
 
-    # ema arrays (for pro)
     ema8_arr = (
         ta.EMA(close_15m, timeperiod=8)
         if len(close_15m) >= 8
@@ -933,14 +1209,18 @@ def detect_signal(
         if HTF_BEAR:
             break_up_tb = False
         if break_up_tb:
-            pro_kinds.append("trend_break_up")
-            pro_reasons.append(
-                f"trend_break_up: slope(H)<0 & c≥H_last*(1+{TB_UP_BUF:.3f})"
+            pro_reason_map.append(
+                (
+                    "trend_break_up",
+                    f"trend_break_up: slope(H)<0 & c≥H_last*(1+{TB_UP_BUF:.3f})",
+                )
             )
         if break_dn_tb:
-            pro_kinds.append("trend_break_down")
-            pro_reasons.append(
-                f"trend_break_down: slope(L)>0 & c≤L_last*(1-{TB_DN_BUF:.3f})"
+            pro_reason_map.append(
+                (
+                    "trend_break_down",
+                    f"trend_break_down: slope(L)>0 & c≤L_last*(1-{TB_DN_BUF:.3f})",
+                )
             )
 
     # 2) 横盘放量
@@ -952,23 +1232,27 @@ def detect_signal(
     if flat and volr_now >= VS_VOLR:
         if rsi >= 52 or (pd.notna(ema20_15) and c >= float(ema20_15)):
             if not HTF_BEAR:
-                pro_kinds.append("volume_shift_long")
-                pro_reasons.append(
-                    f"volume_shift_long: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
+                pro_reason_map.append(
+                    (
+                        "volume_shift_long",
+                        f"volume_shift_long: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}",
+                    )
                 )
         elif rsi <= 48 or (pd.notna(ema20_15) and c <= float(ema20_15)):
             if not HTF_BULL:
-                pro_kinds.append("volume_shift_short")
-                pro_reasons.append(
-                    f"volume_shift_short: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}"
+                pro_reason_map.append(
+                    (
+                        "volume_shift_short",
+                        f"volume_shift_short: flat({body_pct_now:.2f}%/{rng_pct_now:.2f}%) & volr {volr_now:.2f}≥{VS_VOLR:.1f}",
+                    )
                 )
 
     # 3) EMA 多/空头排列（前置硬条件 + 冷却）
     EMA_STACK_ADX = 16
-    EMA_GAP_MIN_PCT = 0.25  # EMA8-20 与 EMA20-50 至少 0.25%
-    EMA20_SLOPE_WIN = 6  # 近 6 根 EMA20 斜率方向一致
-    RNG_MIN_PCT = 0.60  # 当根振幅至少 0.60%（避免横摆假堆叠）
-    EMA_STACK_COOLDOWN = 35 * 60  # 35 分钟冷却
+    EMA_GAP_MIN_PCT = 0.25
+    EMA20_SLOPE_WIN = 6
+    RNG_MIN_PCT = 0.60
+    EMA_STACK_COOLDOWN = 35 * 60
 
     if (
         len(close_15m) >= 50
@@ -1015,21 +1299,25 @@ def detect_signal(
             pre_ok_bull = False
 
         if pre_ok_bull and cooldown_ok:
-            pro_kinds.append("ema_stack_bull")
-            pro_reasons.append(
-                f"ema_stack_bull: EMA8≥20≥50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%"
+            pro_reason_map.append(
+                (
+                    "ema_stack_bull",
+                    f"ema_stack_bull: EMA8≥20≥50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%",
+                )
             )
             LAST_EMA_STACK_TS[symbol] = nowi
         if pre_ok_bear and cooldown_ok:
-            pro_kinds.append("ema_stack_bear")
-            pro_reasons.append(
-                f"ema_stack_bear: EMA8≤20≤50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%"
+            pro_reason_map.append(
+                (
+                    "ema_stack_bear",
+                    f"ema_stack_bear: EMA8≤20≤50 & gaps≥{EMA_GAP_MIN_PCT:.2f}% & ADX {adx:.1f} & rng≥{RNG_MIN_PCT:.2f}%",
+                )
             )
             LAST_EMA_STACK_TS[symbol] = nowi
 
-    # 4) RSI 背离（放宽容差 & 不再被 HTF 直接禁掉，交给 Guard）
+    # 4) RSI 背离（简化版）
     DIV_LOOKBACK = 18
-    DIV_TOL_PCT = 0.22  # from 0.15 -> 0.22
+    DIV_TOL_PCT = 0.22
     if len(df_closed) >= DIV_LOOKBACK + 2:
         lows_ = df_closed["low"].tail(DIV_LOOKBACK + 1).values
         highs_ = df_closed["high"].tail(DIV_LOOKBACK + 1).values
@@ -1046,32 +1334,38 @@ def detect_signal(
             rsi <= rsi_prev * (1 + DIV_TOL_PCT / 100.0)
         )
         if bull_div:
-            pro_kinds.append("rsi_div_long")
-            pro_reasons.append(
-                f"rsi_div_long: price LL vs {DIV_LOOKBACK} 但 RSI 未创新低"
+            pro_reason_map.append(
+                (
+                    "rsi_div_long",
+                    f"rsi_div_long: price LL vs {DIV_LOOKBACK} 但 RSI 未创新低",
+                )
             )
         if bear_div:
-            pro_kinds.append("rsi_div_short")
-            pro_reasons.append(
-                f"rsi_div_short: price HH vs {DIV_LOOKBACK} 但 RSI 未创新高"
+            pro_reason_map.append(
+                (
+                    "rsi_div_short",
+                    f"rsi_div_short: price HH vs {DIV_LOOKBACK} 但 RSI 未创新高",
+                )
             )
 
-    # 5) 量能峰值反转（轻度放宽）
-    CLIMAX_VOLR = 4.2  # from 5.0
-    CLIMAX_RSI_H = 70  # from 72
-    CLIMAX_RSI_L = 30  # from 28
+    # 5) 量能峰值反转（轻放宽）
+    CLIMAX_VOLR = 4.2
+    CLIMAX_RSI_H = 70
+    CLIMAX_RSI_L = 30
     total_rng = max(h - l, 1e-12)
     lower_w = max(min(o, c) - l, 0.0) / total_rng
     upper_w = max(h - max(o, c), 0.0) / total_rng
     if (
         volr_now >= CLIMAX_VOLR
-        and lower_w >= 0.50  # from 0.55
+        and lower_w >= 0.50
         and rsi <= CLIMAX_RSI_L
         and not HTF_BEAR
     ):
-        pro_kinds.append("climax_bottom")
-        pro_reasons.append(
-            f"climax_bottom: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 下影 {lower_w:.2f} & RSI≤{CLIMAX_RSI_L}"
+        pro_reason_map.append(
+            (
+                "climax_bottom",
+                f"climax_bottom: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 下影 {lower_w:.2f} & RSI≤{CLIMAX_RSI_L}",
+            )
         )
     if (
         volr_now >= CLIMAX_VOLR
@@ -1079,19 +1373,18 @@ def detect_signal(
         and rsi >= CLIMAX_RSI_H
         and not HTF_BULL
     ):
-        pro_kinds.append("climax_top")
-        pro_reasons.append(
-            f"climax_top: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 上影 {upper_w:.2f} & RSI≥{CLIMAX_RSI_H}"
+        pro_reason_map.append(
+            (
+                "climax_top",
+                f"climax_top: volr {volr_now:.2f}≥{CLIMAX_VOLR:.1f} & 上影 {upper_w:.2f} & RSI≥{CLIMAX_RSI_H}",
+            )
         )
 
-    # 6) 平衡区突破/回收 + 持续（不反包）确认
+    # 6) 平衡区突破/回收 + 持续
     EQ_WIN = 20
-    # 自适应阈值（随 ATR% 缩放）
     atr_scale = max(0.7, min(1.3, atrp / EQ_ATR_REF))
     EQ_BREAK_BUF = max(0.002, min(0.005, EQ_BREAK_BUF_BASE * (1.0 / atr_scale)))
-    EQ_MIN_BODY_PCT = max(
-        0.0025, min(0.0040, EQ_MIN_BODY_PCT_BASE * (1.0 / atr_scale))
-    )  # 0.25%~0.40%
+    EQ_MIN_BODY_PCT = max(0.0025, min(0.0040, EQ_MIN_BODY_PCT_BASE * (1.0 / atr_scale)))
 
     if len(df_closed) >= EQ_WIN + 2:
         eq_h = float(df_closed["high"].tail(EQ_WIN).max())
@@ -1105,7 +1398,6 @@ def detect_signal(
             body_pct_now_abs >= EQ_MIN_BODY_PCT * 100
         )
 
-        # 假突破回收：实体部分≥一定比例
         EQ_REJ_BODY = 0.6
         reject_up = (
             (h > eq_h * (1.0 + EQ_BREAK_BUF))
@@ -1124,38 +1416,44 @@ def detect_signal(
             break_up = reject_dn = False
 
         if break_up:
-            pro_kinds.append("equilibrium_break_up")
-            pro_reasons.append(
-                f"equilibrium_break_up: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%"
+            pro_reason_map.append(
+                (
+                    "equilibrium_break_up",
+                    f"equilibrium_break_up: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%",
+                )
             )
         if break_dn:
-            pro_kinds.append("equilibrium_break_down")
-            pro_reasons.append(
-                f"equilibrium_break_down: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%"
+            pro_reason_map.append(
+                (
+                    "equilibrium_break_down",
+                    f"equilibrium_break_down: [{eq_l:.6g}, {eq_h:.6g}] buf {EQ_BREAK_BUF:.3f} & body≥{EQ_MIN_BODY_PCT * 100:.2f}%",
+                )
             )
         if reject_up:
-            pro_kinds.append("equilibrium_reject_up")
-            pro_reasons.append(
-                f"equilibrium_reject_up: 假上破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
+            pro_reason_map.append(
+                (
+                    "equilibrium_reject_up",
+                    "equilibrium_reject_up: 假上破后实体≥0.60 回收入区间",
+                )
             )
         if reject_dn:
-            pro_kinds.append("equilibrium_reject_down")
-            pro_reasons.append(
-                f"equilibrium_reject_down: 假下破后实体≥{EQ_REJ_BODY:.2f} 回收入区间"
+            pro_reason_map.append(
+                (
+                    "equilibrium_reject_down",
+                    "equilibrium_reject_down: 假下破后实体≥0.60 回收入区间",
+                )
             )
 
-        # ===== 新增：突破后 N 根内不反包（持续） =====
+        # 持续（不反包）
         if len(df_closed) >= (EQ_WIN + EQ_PERSIST_N + 2):
             closes = df_closed["close"].astype(float).values
             opens = df_closed["open"].astype(float).values
             highs = df_closed["high"].astype(float).values
             lows = df_closed["low"].astype(float).values
 
-            # 滚动窗口的区间上下界
             eq_h_series = pd.Series(highs).rolling(EQ_WIN).max().values
             eq_l_series = pd.Series(lows).rolling(EQ_WIN).min().values
 
-            # 取最后 EQ_PERSIST_N+5 根做回顾，找“最近一次突破”的收盘位置 idx_b
             lookback = min(EQ_PERSIST_N + 5, len(df_closed) - 2)
             idx_end = len(df_closed) - 1
             idx_start = idx_end - lookback
@@ -1166,7 +1464,6 @@ def detect_signal(
                 if j < EQ_WIN:
                     break
                 body_pct_j = abs(closes[j] - opens[j]) / max(opens[j], 1e-12) * 100.0
-                # 上破确认（修复 NaN 判断：用 pd.isna）
                 if (
                     not pd.isna(eq_h_series[j])
                     and closes[j] >= eq_h_series[j] * (1.0 + EQ_BREAK_BUF)
@@ -1178,7 +1475,6 @@ def detect_signal(
                 if j < EQ_WIN:
                     break
                 body_pct_j = abs(closes[j] - opens[j]) / max(opens[j], 1e-12) * 100.0
-                # 下破确认（修复 NaN 判断：用 pd.isna）
                 if (
                     not pd.isna(eq_l_series[j])
                     and closes[j] <= eq_l_series[j] * (1.0 - EQ_BREAK_BUF)
@@ -1187,7 +1483,6 @@ def detect_signal(
                     idx_b_dn = j
                     break
 
-            # 放宽“反包定义”：实体覆盖 ≥ 70% + 收盘越过中点
             def bearish_engulf_relaxed(prev_open, prev_close, o1, c1) -> bool:
                 prev_low = min(prev_open, prev_close)
                 prev_high = max(prev_open, prev_close)
@@ -1206,7 +1501,6 @@ def detect_signal(
                 )
                 return (o1 < prev_low) and (c1 > prev_mid) and covered
 
-            # 检查上破后的 N 根
             if idx_b_up is not None and not HTF_BEAR:
                 ok = True
                 end_chk = min(idx_b_up + EQ_PERSIST_N, len(df_closed) - 1)
@@ -1217,12 +1511,13 @@ def detect_signal(
                         ok = False
                         break
                 if ok:
-                    pro_kinds.append("equilibrium_persist_up")
-                    pro_reasons.append(
-                        f"equilibrium_persist_up: 上破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)"
+                    pro_reason_map.append(
+                        (
+                            "equilibrium_persist_up",
+                            f"equilibrium_persist_up: 上破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)",
+                        )
                     )
 
-            # 检查下破后的 N 根
             if idx_b_dn is not None and not HTF_BULL:
                 ok = True
                 end_chk = min(idx_b_dn + EQ_PERSIST_N, len(df_closed) - 1)
@@ -1233,9 +1528,11 @@ def detect_signal(
                         ok = False
                         break
                 if ok:
-                    pro_kinds.append("equilibrium_persist_down")
-                    pro_reasons.append(
-                        f"equilibrium_persist_down: 下破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)"
+                    pro_reason_map.append(
+                        (
+                            "equilibrium_persist_down",
+                            f"equilibrium_persist_down: 下破后 {EQ_PERSIST_N} 根内无反向吞没(放宽判定)",
+                        )
                     )
 
     # ===== 聚合：Base + Pro → 候选清单 =====
@@ -1244,6 +1541,7 @@ def detect_signal(
     # Base
     if explode_up:
         candidates.append(("explode_up", []))
+        LAST_EXPLODE_UP[symbol] = int(time.time())  # [FIX] 产生候选即记录
     if explode_down:
         candidates.append(("explode_down", []))
     if pullback_long:
@@ -1263,15 +1561,29 @@ def detect_signal(
     if ema_rebound_short:
         candidates.append(("ema_rebound_short", []))
 
-    # Pro（附带理由）
-    for k in pro_kinds:
-        candidates.append((k, pro_reasons))
+    # Pro（每个候选独立理由）
+    for k, r in pro_reason_map:
+        candidates.append((k, [r]))
 
     if not candidates:
         dbg(
             f"[FILTERED {symbol}] eq_bar=${eq_now_bar_usd:,.0f} volr={volr_now:.2f} pct={pct_now:.2f}% ADX={adx:.1f} no-signal"
         )
         return False, None
+
+    # [ADD SR] —— 计算 SR 上下文（优先 1h 退化当前）
+    try:
+        sr_ctx = _sr_context_from_df(
+            df_1h
+            if isinstance(df_1h, pd.DataFrame) and len(df_1h) >= 60
+            else df_closed,
+            c,
+            topn=6,
+        )
+    except Exception:
+        sr_ctx = {}
+    sr_dist_R = sr_ctx.get("dist_to_resistance_pct")
+    sr_dist_S = sr_ctx.get("dist_to_support_pct")
 
     # ===== 对每个候选 kind 计算评分 & Guard =====
     base_bonus = {
@@ -1301,7 +1613,6 @@ def detect_signal(
         "rsi_div_short": 0.12,
     }
 
-    # 优先级：数值越小越靠前
     priority = {
         "trend_break_up": 0,
         "trend_break_down": 0,
@@ -1329,7 +1640,6 @@ def detect_signal(
         "explode_down": 6,
     }
 
-    # 日内信息
     tick = get_tick_size(ex, symbol)
     day_high, day_low, pct24, last_price = get_day_stats(ex, symbol, tick)
     dist_day_high_pct = (
@@ -1343,9 +1653,8 @@ def detect_signal(
         else None
     )
 
-    # 统一 Guard 档位与影子模式
     level = "HARD" if MODE == "QUIET" else "MEDIUM"
-    SHADOW = False  # 观察期使用 True；要拦截则改 False
+    SHADOW = False  # 可切换观察期
 
     evaluated = []
     for kind, extra_reasons in candidates:
@@ -1378,7 +1687,7 @@ def detect_signal(
         if HTF_BEAR:
             reasons.append("HTF=15m/1h 空头闸门")
         reasons += extra_reasons
-        # base 的简述
+
         if kind == "explode_up":
             reasons += [
                 f"explode_up: volr {volr_now:.2f}≥{EXP_VOLR:.2f}",
@@ -1397,6 +1706,21 @@ def detect_signal(
                     f"post-explode lock checked: {int(time.time()) - last_up_ts}s"
                 )
 
+        # [ADD SR] 文案补充最近 SR
+        if sr_ctx:
+            nr = sr_ctx.get("near_resistance")
+            ns = sr_ctx.get("near_support")
+            dr = sr_ctx.get("dist_to_resistance_pct")
+            ds_ = sr_ctx.get("dist_to_support_pct")
+            reasons.append(
+                f"SR near: R≈{nr if nr is not None else '—'}, S≈{ns if ns is not None else '—'}"
+                + (
+                    f" | ΔR={dr:.2f}% ΔS={ds_:.2f}%"
+                    if (dr is not None and ds_ is not None)
+                    else ""
+                )
+            )
+
         entry_safe = conservative_entry(
             "NA",
             side,
@@ -1409,7 +1733,8 @@ def detect_signal(
         tp1_s, tp2_s, tp3_s, sl_s = tpsl_for_safe_entry(side, entry_safe, tick)
         tp1_i, tp2_i, tp3_i, sl_i = dynamic_targets("NA", side, c, df_closed, tick)
 
-        cmd_immd = (
+        # [FIX] cmd_immd 正确存取
+        cmd_immd_local = (
             f"/forcelong {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
             if side == "long"
             else f"/forceshort {symbol} 10 10 {tp1_i} {tp2_i} {tp3_i} {sl_i} {c:.6g}"
@@ -1420,6 +1745,7 @@ def detect_signal(
             else f"/forceshort {symbol} 10 10 {tp1_s} {tp2_s} {tp3_s} {sl_s} {entry_safe}"
         )
 
+        # 统一 Guard
         block, reasons_guard, votes, need_votes = _eval_guard(
             kind,
             side,
@@ -1433,7 +1759,7 @@ def detect_signal(
             day_high=day_high,
             day_low=day_low,
             level=level,
-            shadow=False,
+            shadow=SHADOW,  # [FIX]
             volr_now=volr_now,
             adx_val=adx,
             htf_bull=HTF_BULL,
@@ -1441,6 +1767,9 @@ def detect_signal(
             squeeze_width=bb_width
             if "bb_squeeze" in kind and pd.notna(bb_width)
             else None,
+            # [ADD SR]
+            sr_dist_to_resistance_pct=sr_dist_R,
+            sr_dist_to_support_pct=sr_dist_S,
         )
         status = "BLOCK" if block else "PASS"
         dbg(
@@ -1458,8 +1787,24 @@ def detect_signal(
             f"Base vps: <b>{vps_base:.4f}</b> | Trend: {trend_text} {'✅' if ((HTF_BULL and side == 'long') or (HTF_BEAR and side == 'short')) else '—'}",
             "Why: " + " ; ".join(reasons_show),
         ]
+        # [ADD SR] 让正文也带一行 SR 概览（方便 reader）
+        if sr_ctx:
+            nr = sr_ctx.get("near_resistance")
+            ns = sr_ctx.get("near_support")
+            dr = sr_ctx.get("dist_to_resistance_pct")
+            ds_ = sr_ctx.get("dist_to_support_pct")
+            sr_line = f"SR near: R≈{nr if nr is not None else '—'}, S≈{ns if ns is not None else '—'}"
+            if (dr is not None) or (ds_ is not None):
+                sr_more = []
+                if dr is not None:
+                    sr_more.append(f"ΔR={dr:.2f}%")
+                if ds_ is not None:
+                    sr_more.append(f"ΔS={ds_:.2f}%")
+                sr_line += " | " + " ".join(sr_more)
+            text_core.append(sr_line)
+
         if not SAFE_MODE_ALWAYS:
-            text_core.append(f"<code>{cmd_immd}</code>")
+            text_core.append(f"<code>{cmd_immd_local}</code>")
         text_core += [
             f"<b>Conservative Entry:</b> <code>{entry_safe}</code> | SL(≈{SAFE_SL_PCT:.1f}%): <code>{tpsl_for_safe_entry(side, entry_safe, tick)[-1]}</code>",
             f"<code>{cmd_safe}</code>",
@@ -1473,18 +1818,16 @@ def detect_signal(
                 "priority": priority.get(kind, 9),
                 "text_core": text_core,
                 "trend_text": trend_text,
-                "cmd_immd": (None if SAFE_MODE_ALWAYS else text_core[-2]),
-                "cmd_safe": text_core[-1],
+                "cmd_immd": (
+                    None if SAFE_MODE_ALWAYS else f"<code>{cmd_immd_local}</code>"
+                ),
+                "cmd_safe": f"<code>{cmd_safe}</code>",
             }
         )
-
-        if kind == "explode_up":
-            LAST_EXPLODE_UP[symbol] = int(time.time())
 
     if not evaluated:
         return False, None
 
-    # 选择：优先级小者优先，再按分数高者
     evaluated.sort(key=lambda x: x["score"], reverse=True)
     evaluated.sort(key=lambda x: x["priority"])
 
@@ -1495,7 +1838,6 @@ def detect_signal(
     text_core = best["text_core"]
     trend_text = best["trend_text"]
 
-    # —— 结构化的 HTF 状态 —— #
     htf_gate = "BULL" if HTF_BULL else ("BEAR" if HTF_BEAR else "")
 
     payload = {
@@ -1510,31 +1852,42 @@ def detect_signal(
         "vps_base": float(vps_base),
         "eq_base_bar_usd": float(eq_base_bar_usd),
         "eq_now_bar_usd": float(eq_now_bar_usd),
-        # —— HTF 相关（新增）——
-        "htf_gate": htf_gate,  # "BULL" / "BEAR" / ""（formatter可直接用）
-        "htf_bull": bool(HTF_BULL),  # 可选：布尔
-        "htf_bear": bool(HTF_BEAR),  # 可选：布尔
-        # 兼容旧模板：保留 trend_text（人读友好）
+        "htf_gate": htf_gate,
+        "htf_bull": bool(HTF_BULL),
+        "htf_bear": bool(HTF_BEAR),
         "trend_text": trend_text,
-        # —— 触发原因（新增：给 formatter 用）——
-        # 注意：reasons_show 已在上文构建（受 PRINT_FULL_REASONS / MAX_REASONS_IN_MSG 控制）
         "reasons": reasons_show,
         "trend_align": bool(
             (HTF_BULL and side == "long") or (HTF_BEAR and side == "short")
         ),
-        "text_core": text_core,  # 保持原有长文描述
+        "text_core": text_core,
         "score": float(sc),
-        # 日内信息
         "day_high": day_high,
         "day_low": day_low,
         "pct24": pct24,
         "dist_day_high_pct": dist_day_high_pct,
         "dist_day_low_pct": dist_day_low_pct,
         "last_price": last_price or c,
-        # 命令
         "cmd_safe": best["cmd_safe"],
     }
     if not SAFE_MODE_ALWAYS and best.get("cmd_immd") is not None:
         payload["cmd_immd"] = best["cmd_immd"]
+
+    # [ADD SR] —— 放进 payload，供 formatter 使用
+    payload.update(
+        {
+            "sr_near_resistance": sr_ctx.get("near_resistance") if sr_ctx else None,
+            "sr_near_support": sr_ctx.get("near_support") if sr_ctx else None,
+            "sr_dist_to_resistance_pct": sr_ctx.get("dist_to_resistance_pct")
+            if sr_ctx
+            else None,
+            "sr_dist_to_support_pct": sr_ctx.get("dist_to_support_pct")
+            if sr_ctx
+            else None,
+            "sr_levels_resistance": sr_ctx.get("R_levels") if sr_ctx else None,
+            "sr_levels_support": sr_ctx.get("S_levels") if sr_ctx else None,
+            "sr_band_abs": sr_ctx.get("band_abs") if sr_ctx else None,
+        }
+    )
 
     return True, payload
