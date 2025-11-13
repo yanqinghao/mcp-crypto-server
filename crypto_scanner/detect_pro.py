@@ -199,8 +199,27 @@ def _kind_cn(kind: str) -> str:
 # [ADD SR] 计算 SR 上下文（不重复取 K 线）
 # =========================
 def _sr_context_from_df(df: pd.DataFrame, current: float, topn: int = 6) -> dict:
+    """
+    更稳健的 SR 计算（单边行情友好）：
+    - 移除 histogram densify，改用多窗口 LLV 阶梯来补足支撑（全为“真实出现过”的价位）
+    - 几何间距：越靠近 current 间距越大，向远处逐步放宽，避免簇状拥挤
+    - 受限 Fib 外推：当一侧层级不足时最多补 1 层，且受最大外推深度与最小间距约束
+    - 真实范围保护：不输出超出历史合理范围太多的“虚构深位”
+    - 兜底：每侧至少保证 2 个层级（仍遵守所有约束）
+    """
     import numpy as np
     import pandas as pd
+
+    # --------- 辅助：基础统计 --------- #
+    def _atr_abs(df_):
+        highs, lows, closes = df_["high"].values, df_["low"].values, df_["close"].values
+        if len(closes) < 2:
+            return 0.0
+        hl = highs - lows
+        hc = np.abs(highs[1:] - closes[:-1])
+        lc = np.abs(lows[1:] - closes[:-1])
+        tr = np.maximum(hl[1:], np.maximum(hc, lc))
+        return float(pd.Series(tr).rolling(14, min_periods=1).mean().iloc[-1])
 
     def _swing_points(df_, window=2):
         highs, lows = df_["high"].values, df_["low"].values
@@ -243,80 +262,48 @@ def _sr_context_from_df(df: pd.DataFrame, current: float, topn: int = 6) -> dict
         lvls.sort(key=lambda x: (x["score"], x["touches"]), reverse=True)
         return lvls
 
-    def _enforce_spacing(sorted_lvls, min_gap_abs, reverse=False):
-        """
-        在已排序的价位序列上强制最小间距：
-        - reverse=False 表示升序（阻力）
-        - reverse=True  表示降序（支撑）
-        """
-        if not sorted_lvls:
+    # 几何间距：靠近 current 更严、越远逐步放宽
+    def _geometric_enforce(sorted_by_price_desc, first_min_gap_abs, grow=1.3):
+        if not sorted_by_price_desc:
             return []
         kept = []
-        last_price = None
-        for node in sorted_lvls:
+        last_p = None
+        gap = float(first_min_gap_abs)
+        for node in sorted_by_price_desc:
             p = float(node["price"])
-            if last_price is None or (abs(p - last_price) >= min_gap_abs):
+            if (last_p is None) or (abs(last_p - p) >= gap):
                 kept.append(node)
-                last_price = p
-        # 再次扫一遍，确保相邻满足间距（极端情况下多源合并后仍可能相近）
-        out = [kept[0]]
-        for node in kept[1:]:
-            if abs(float(node["price"]) - float(out[-1]["price"])) >= min_gap_abs:
-                out.append(node)
-        return out
+                last_p = p
+                gap *= grow  # 逐层增大最小间距
+        return kept
 
-    def _densify_support_by_hist(lows, current_, band_abs, needed):
-        arr = np.array([x for x in lows if x <= current_])
-        if len(arr) == 0 or needed <= 0:
-            return []
-        lo, hi = arr.min(), current_
-        bins = max(8, int((hi - lo) / max(1e-12, band_abs)))
-        bins = min(bins, 200)
-        hist, edges = np.histogram(arr, bins=bins, range=(lo, hi))
-        centers = (edges[:-1] + edges[1:]) / 2.0
-        idxs = np.argsort(-hist)
+    # LLV 阶梯：真实低点的多窗口下界，不做直方图
+    def _llv_ladder_supports(df_, windows=(20, 34, 55, 89, 144, 233)):
+        lows = df_["low"].astype(float).values
         out = []
-        for k in idxs[:needed]:
-            if hist[k] <= 0:
-                continue
-            out.append(
-                {
-                    "price": float(centers[k]),
-                    "touches": int(hist[k]),
-                    "last_idx": 0,
-                    "score": float(hist[k]),
-                }
-            )
-        out_sorted = sorted(out, key=lambda x: x["price"])
-        # 合并过近的柱心
+        for w in windows:
+            if len(lows) >= w:
+                lv = float(pd.Series(lows).rolling(w).min().iloc[-1])
+                out.append(
+                    {"price": lv, "touches": 1, "last_idx": len(df_) - 1, "score": 0.5}
+                )
+        # 去重（按价格合并近似重复）
+        out = sorted(out, key=lambda x: x["price"], reverse=True)
         merged = []
-        for node in out_sorted:
-            if not merged or abs(node["price"] - merged[-1]["price"]) > band_abs:
-                merged.append(node)
-            else:
-                prev = merged[-1]
-                merged[-1] = {
-                    "price": (prev["price"] + node["price"]) / 2.0,
-                    "touches": prev["touches"] + node["touches"],
-                    "last_idx": max(prev["last_idx"], node["last_idx"]),
-                    "score": prev["score"] + node["score"],
-                }
-        merged.sort(key=lambda x: (x["score"], x["touches"]), reverse=True)
-        return merged[:needed]
+        for n in out:
+            if not merged or abs(n["price"] - merged[-1]["price"]) > 1e-8:
+                merged.append(n)
+        return merged
 
     def _fib_extend(side: str, anchor_price: float, step_ref: float, count: int):
-        """
-        斐波那契延展：
-        - side='R'（向上）：anchor + step*ratio
-        - side='S'（向下）：anchor - step*ratio
-        """
-        F = [1.272, 1.414, 1.618, 2.0, 2.618, 3.618]
+        F = [1.272, 1.414, 1.618]
         out = []
-        for r in F:
-            if side == "R":
-                p = anchor_price + step_ref * r
-            else:
-                p = anchor_price - step_ref * r
+        for r in F[: max(1, count)]:
+            p = (
+                anchor_price + step_ref * r
+                if side == "R"
+                else anchor_price - step_ref * r
+            )
             out.append(
                 {
                     "price": float(p),
@@ -326,98 +313,173 @@ def _sr_context_from_df(df: pd.DataFrame, current: float, topn: int = 6) -> dict
                     "ext": True,
                 }
             )
-            if len(out) >= count:
-                break
         return out
 
-    # —— 自适应带宽与最小间距 —— #
-    high, low, close = df["high"].values, df["low"].values, df["close"].values
-    if len(close) < 2:
+    def _coarse_spacing(arr_sorted, min_gap):
+        kept, last = [], None
+        for node in arr_sorted:
+            if (last is None) or (abs(node["price"] - last["price"]) >= min_gap):
+                kept.append(node)
+                last = node
+        return kept
+
+    def _step_ref_from_other(levels_sorted, default_step):
+        if len(levels_sorted) >= 2:
+            return abs(levels_sorted[0]["price"] - levels_sorted[1]["price"])
+        elif len(levels_sorted) == 1:
+            return max(default_step, abs(current - levels_sorted[0]["price"]))
+        else:
+            return default_step
+
+    # ========== 主流程 ========== #
+    if not isinstance(df, pd.DataFrame) or df.empty or current <= 0:
         return {}
-    hl = high - low
-    hc = np.abs(high[1:] - close[:-1])
-    lc = np.abs(low[1:] - close[:-1])
-    tr = np.maximum(hl[1:], np.maximum(hc, lc))
-    atr = float(pd.Series(tr).rolling(14, min_periods=1).mean().iloc[-1])
 
-    band_abs = max(atr * 0.25, current * 0.002)
-    # 你要“考虑空间”，这里用更强的最小间距（>= band_abs 的 1.0 倍，再与价格千分之二取大）
-    min_gap_abs = max(band_abs, current * 0.002)
+    atr_abs = _atr_abs(df)
+    band_abs = max(atr_abs * 0.25, current * 0.002)  # 聚类带宽
+    first_min_gap_abs = max(atr_abs * 0.40, current * 0.003)  # 第一层最小间距更严
 
-    # —— 基于摆动点聚类 —— #
+    highs, lows = df["high"].values, df["low"].values
     R_pts, S_pts = _swing_points(df, window=2)
     R_all = _cluster_levels(R_pts, band_abs, len(df))
     S_all = _cluster_levels(S_pts, band_abs, len(df))
 
-    # —— 分上/下（相对 current） —— #
+    # 上/下侧（相对 current）
     R_above = [x for x in R_all if x["price"] >= current]
     S_below = [x for x in S_all if x["price"] <= current]
 
-    # —— 如果支撑侧太少，做 histogram densify（仍在 current 下方） —— #
+    # —— 用 LLV 阶梯补充 S（替代 histogram densify）—— #
     if len(S_below) < topn:
-        need = topn - len(S_below)
-        extra = _densify_support_by_hist(
-            df["low"].values.astype(float), current, band_abs, need
-        )
-        # 避免与已有点过近
-        for e in extra:
-            if all(abs(e["price"] - s["price"]) > band_abs for s in S_below):
+        ladder = _llv_ladder_supports(df)
+        for e in ladder:
+            if e["price"] <= current and all(
+                abs(e["price"] - s["price"]) > band_abs for s in S_below
+            ):
                 S_below.append(e)
 
-    # —— 初步排序 & 截断 —— #
-    R_out = sorted(R_above, key=lambda x: x["price"])[
-        : (topn * 2)
-    ]  # 放宽，待会做间距筛
+    # —— 排序 + 间距去密 —— #
+    R_out = sorted(R_above, key=lambda x: x["price"])[: (topn * 2)]
     S_out = sorted(S_below, key=lambda x: x["price"], reverse=True)[: (topn * 2)]
 
-    # —— 强制最小间距（考虑空间） —— #
-    R_out = _enforce_spacing(R_out, min_gap_abs, reverse=False)
-    S_out = _enforce_spacing(S_out, min_gap_abs, reverse=True)
+    R_out = _coarse_spacing(R_out, first_min_gap_abs)
+    S_out = _coarse_spacing(S_out, first_min_gap_abs)
+    S_out = _geometric_enforce(S_out, first_min_gap_abs, grow=1.35)
+    R_out = _geometric_enforce(R_out, first_min_gap_abs, grow=1.25)
 
-    # —— 单边行情：不足两点 → 斐波那契延展（基于另一侧已得到的点位尺度） —— #
-    # 参考步长（step_ref）：优先用另一侧最近两个点的“层间距”；若只有一个，则用 |current-该点|；都没有就退化用 max(band_abs, atr, current*0.005)
-    def _step_ref_from_other(other_levels, side_for_ref: str):
-        if len(other_levels) >= 2:
-            return abs(other_levels[0]["price"] - other_levels[1]["price"])
-        elif len(other_levels) == 1:
-            return max(band_abs, abs(current - other_levels[0]["price"]))
-        else:
-            return max(band_abs, atr, current * 0.005)
+    # —— 真实范围保护：不输出“离谱深”的虚构层级 —— #
+    if len(lows) >= 240:
+        llv240 = float(pd.Series(lows).rolling(240).min().iloc[-1])
+        hard_floor = max(llv240 - 20.0 * atr_abs, 0.0)
+        S_out = [x for x in S_out if x["price"] >= hard_floor]
 
-    # 扩展阻力（向上）
+    # —— 受限斐波延展（各侧最多补 1 个；受最大深度 + 间距约束） —— #
+    guard_depth_pct = 8.0  # R 向上/S 向下最大外推深度（相对 current），可按需调整
+    max_depth_abs = current * guard_depth_pct / 100.0
+
+    # R 不足：向上延展 1 个
     if len(R_out) < 2:
         anchor = R_out[-1]["price"] if R_out else current
-        step_ref = _step_ref_from_other(S_out, "S")
-        ext_need = max(0, 2 - len(R_out)) + (topn - len(R_out))
-        ext = _fib_extend("R", anchor, step_ref, max(2, ext_need))
-        # 只要 > current，且与已有保持最小间距
-        cand = sorted(
-            [x for x in ext if x["price"] > current], key=lambda x: x["price"]
-        )
-        for node in cand:
-            if all(abs(node["price"] - r["price"]) >= min_gap_abs for r in R_out):
+        step_ref = _step_ref_from_other(S_out, max(band_abs, atr_abs))
+        cand = _fib_extend("R", anchor, step_ref, count=1)
+        cand = [
+            x
+            for x in cand
+            if (x["price"] > current) and (x["price"] - current) <= max_depth_abs
+        ]
+        for node in sorted(cand, key=lambda z: z["price"]):
+            if all(abs(node["price"] - r["price"]) >= first_min_gap_abs for r in R_out):
                 R_out.append(node)
-                if len(R_out) >= topn:
-                    break
+                break
         R_out = sorted(R_out, key=lambda x: x["price"])[:topn]
 
-    # 扩展支撑（向下）
+    # S 不足：向下延展 1 个
     if len(S_out) < 2:
         anchor = S_out[-1]["price"] if S_out else current
-        step_ref = _step_ref_from_other(R_out, "R")
-        ext_need = max(0, 2 - len(S_out)) + (topn - len(S_out))
-        ext = _fib_extend("S", anchor, step_ref, max(2, ext_need))
-        cand = sorted(
-            [x for x in ext if x["price"] < current],
-            key=lambda x: x["price"],
-            reverse=True,
-        )
-        for node in cand:
-            if all(abs(node["price"] - s["price"]) >= min_gap_abs for s in S_out):
+        step_ref = _step_ref_from_other(R_out, max(band_abs, atr_abs))
+        cand = _fib_extend("S", anchor, step_ref, count=1)
+        cand = [x for x in cand if (current - x["price"]) <= max_depth_abs]
+        for node in sorted(cand, key=lambda z: z["price"], reverse=True):
+            if all(abs(node["price"] - s["price"]) >= first_min_gap_abs for s in S_out):
                 S_out.append(node)
-                if len(S_out) >= topn:
-                    break
+                break
         S_out = sorted(S_out, key=lambda x: x["price"], reverse=True)[:topn]
+
+    # ===== 兜底：每侧至少保证 2 个层级（仍遵守间距/深度约束） =====
+    MIN_LEVELS_PER_SIDE = 2
+
+    def _try_append_level(levels, new_price, reverse=False):
+        node = {
+            "price": float(new_price),
+            "touches": 0,
+            "last_idx": len(df) - 1,
+            "score": 0.0,
+            "ext": True,
+        }
+        # 间距 & 合法性
+        ok_gap = all(
+            abs(node["price"] - x["price"]) >= first_min_gap_abs for x in levels
+        )
+        if (not ok_gap) or (node["price"] <= 0):
+            return False
+        # 深度保护（按方向）
+        if reverse:  # S
+            if (current - node["price"]) > max_depth_abs:
+                return False
+        else:  # R
+            if (node["price"] - current) > max_depth_abs:
+                return False
+        # 通过则追加并维护顺序/截断
+        levels.append(node)
+        if reverse:
+            levels.sort(key=lambda x: x["price"], reverse=True)
+        else:
+            levels.sort(key=lambda x: x["price"])
+        while len(levels) > topn:
+            levels.pop()
+        return True
+
+    def _robust_step(other_side_levels):
+        base = max(band_abs, atr_abs, current * 0.005)
+        return _step_ref_from_other(other_side_levels, base)
+
+    # —— 保证 R ≥ 2 —— #
+    if len(R_out) < MIN_LEVELS_PER_SIDE:
+        step = _robust_step(S_out)
+        anchor_R = R_out[-1]["price"] if R_out else current
+        tries_R = []
+        # 优先 fib 1.272，再线性 1.0 step
+        cand1 = anchor_R + step * 1.272
+        cand2 = anchor_R + step
+        for cp in (cand1, cand2):
+            if (cp - current) <= max_depth_abs:
+                tries_R.append(cp)
+        for cp in tries_R:
+            if len(R_out) >= MIN_LEVELS_PER_SIDE:
+                break
+            _try_append_level(R_out, cp, reverse=False)
+        if len(R_out) < MIN_LEVELS_PER_SIDE:
+            cp3 = (R_out[-1]["price"] if R_out else current) + step * 0.8
+            if (cp3 - current) <= max_depth_abs:
+                _try_append_level(R_out, cp3, reverse=False)
+
+    # —— 保证 S ≥ 2 —— #
+    if len(S_out) < MIN_LEVELS_PER_SIDE:
+        step = _robust_step(R_out)
+        anchor_S = S_out[-1]["price"] if S_out else current
+        tries_S = []
+        cand1 = anchor_S - step * 1.272
+        cand2 = anchor_S - step
+        for cp in (cand1, cand2):
+            if (current - cp) <= max_depth_abs:
+                tries_S.append(cp)
+        for cp in tries_S:
+            if len(S_out) >= MIN_LEVELS_PER_SIDE:
+                break
+            _try_append_level(S_out, cp, reverse=True)
+        if len(S_out) < MIN_LEVELS_PER_SIDE:
+            cp3 = (S_out[-1]["price"] if S_out else current) - step * 0.8
+            if (current - cp3) <= max_depth_abs:
+                _try_append_level(S_out, cp3, reverse=True)
 
     # —— 取最近位与到位百分比 —— #
     near_R = next(
@@ -446,7 +508,6 @@ def _sr_context_from_df(df: pd.DataFrame, current: float, topn: int = 6) -> dict
         "near_support": (near_S["price"] if near_S else None),
         "dist_to_resistance_pct": _gap_pct(near_R),
         "dist_to_support_pct": _gap_pct(near_S),
-        # 注意：已经做了“空间最小间距”与“必要时的斐波延展”
         "R_levels": sorted(R_out, key=lambda x: x["price"])[:topn],
         "S_levels": sorted(S_out, key=lambda x: x["price"], reverse=True)[:topn],
     }
