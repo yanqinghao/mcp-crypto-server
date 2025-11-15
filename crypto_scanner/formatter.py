@@ -71,6 +71,8 @@ def _infer_side(kind: str, side_hint: Optional[str] = None) -> str:
         "breakout_retest_long",
         "range_reject_long",
         "exhaustion_reversal_long",
+        "volume_climax_long",
+        "rubber_band_long",
     }
     short_kinds = {
         "breakout_down",
@@ -82,6 +84,8 @@ def _infer_side(kind: str, side_hint: Optional[str] = None) -> str:
         "breakout_retest_short",
         "range_reject_short",
         "exhaustion_reversal_short",
+        "volume_climax_short",
+        "rubber_band_short",
     }
 
     if k in long_kinds:
@@ -188,6 +192,33 @@ def _risk_hints(p: dict, side: str, last_price, sl_price) -> list[str]:
                 f"✅ 止损距离当前价约 {_fmt_pct(loss_pct)}，风险区间相对合理。"
             )
 
+    # ===== 资金费率相关提示 =====
+    fr_pct = p.get("funding_rate_pct")
+    if fr_pct is not None:
+        try:
+            fr = float(fr_pct)  # 这里的 fr 就是 “0.05 → 0.05%” 这种
+            # 阈值可以根据你实际品种再调，比如 0.05 ~ 0.10 之间。
+            if side == "long":
+                if fr > 0.05:
+                    hints.append(
+                        "⚠️ 资金费率偏高，多头持仓成本较大，避免长时间重仓持有。"
+                    )
+                elif fr < -0.02:
+                    hints.append(
+                        "✅ 当前多头收资金费率，略有持仓优势，但也可能存在挤空风险。"
+                    )
+            elif side == "short":
+                if fr < -0.05:
+                    hints.append(
+                        "⚠️ 资金费率偏低（负值较大），空头持仓成本较大，避免长时间重仓。"
+                    )
+                elif fr > 0.02:
+                    hints.append(
+                        "✅ 当前空头收资金费率，有一定持仓优势，但注意潜在逼空。"
+                    )
+        except Exception:
+            pass
+
     return hints
 
 
@@ -225,6 +256,12 @@ def format_signal_cn(p: dict) -> str:
     sr_res_list = p.get("sr_levels_resistance") or []
     sr_sup_list = p.get("sr_levels_support") or []
 
+    # 资金费率信息
+    funding_rate_pct = p.get("funding_rate_pct")  # detect_signal 里已经是 % 值
+    funding_side = (
+        p.get("funding_side") or ""
+    )  # long_pays_short / short_pays_long / neutral
+
     # ===== 头部 =====
     # 例：📈 TRUMP/USDT:USDT｜长下影反转｜方向：多
     lines: list[str] = [
@@ -242,6 +279,21 @@ def format_signal_cn(p: dict) -> str:
         lines.append(f"阻力：{_fmt_price(near_R)}（{_fmt_pct(dist_R)}）")
     if near_S is not None and dist_S is not None:
         lines.append(f"支撑：{_fmt_price(near_S)}（{_fmt_pct(dist_S)}）")
+
+    # 资金费率（如果有）
+    if funding_rate_pct is not None:
+        try:
+            fr = float(funding_rate_pct)
+            fr_str = _fmt_pct(fr)  # funding_rate_pct 已经是“0.01 → 0.01%”语义
+            if funding_side == "long_pays_short":
+                lines.append(f"资金费率：{fr_str}（多头支付空头）")
+            elif funding_side == "short_pays_long":
+                lines.append(f"资金费率：{fr_str}（空头支付多头）")
+            else:
+                lines.append(f"资金费率：{fr_str}")
+        except Exception:
+            # 出问题就不显示
+            pass
 
     lines.append("")
 

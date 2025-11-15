@@ -11,7 +11,7 @@ import pandas as pd
 import talib as ta
 
 from .exchange import fetch_ohlcv_df, get_tick_size
-from .liquidity import get_day_stats
+from .liquidity import get_day_stats, _fetch_funding_rate_safe
 from .config import (
     KINDS_CN,
     SAFE_SL_PCT,
@@ -837,6 +837,100 @@ def signal_range_break(h1_closes):
     return None, None
 
 
+def signal_range_reject(
+    c: float,
+    o: float,
+    h: float,
+    l: float,
+    hh: float,
+    ll: float,
+    atr_abs: float,
+    adx: float,
+    near_R: Optional[float],
+    near_S: Optional[float],
+    breakout_up: bool,
+    breakout_down: bool,
+):
+    """
+    区间边缘拒绝（Range Edge Rejection）升级版：
+    使用条件：
+      1) ADX 偏低（弱趋势，认为在箱体/震荡）
+      2) 当前价靠近“区间顶/底”（距边界 <= 边缘带宽）
+      3) 当前 K 线出现与边界方向相反的长影线 + 一定幅度（拒绝而不是突破）
+      4) 当根不能是明显突破（排除 breakout_up / breakout_down）
+
+    返回:
+      ("range_reject_long/short", 边界价) 或 (None, None)
+    """
+    if atr_abs is None or atr_abs <= 0 or c <= 0:
+        return None, None
+
+    # 1) 只有 ADX 足够低时才认作“区间”
+    #    阈值可以按你口味调，比如 < 20 更严格
+    if adx is not None and adx > 25:
+        return None, None
+
+    # 2) 确定区间上下边界：
+    #    - 以最近 hh/ll 为主
+    #    - 如果 SR 近反而更近，就用 SR 做“结构边界”
+    top_candidates = []
+    bottom_candidates = []
+
+    if hh is not None:
+        top_candidates.append(float(hh))
+    if near_R is not None:
+        top_candidates.append(float(near_R))
+
+    if ll is not None:
+        bottom_candidates.append(float(ll))
+    if near_S is not None:
+        bottom_candidates.append(float(near_S))
+
+    if not top_candidates or not bottom_candidates:
+        return None, None
+
+    range_top = max(top_candidates)
+    range_bottom = min(bottom_candidates)
+    range_width = range_top - range_bottom
+    if range_width <= 0:
+        return None, None
+
+    # 3) 定义“边缘带宽”：边界 ± max(0.8*ATR, 0.25%价格)
+    edge_band = max(atr_abs * 0.8, c * 0.0025)
+
+    # 离上沿/下沿的距离
+    dist_to_top = range_top - c
+    dist_to_bottom = c - range_bottom
+
+    near_top = dist_to_top >= 0 and dist_to_top <= edge_band
+    near_bottom = dist_to_bottom >= 0 and dist_to_bottom <= edge_band
+
+    # 4) 本根 K 的影线结构
+    rng = max(h - l, 1e-12)
+    lower_w = max(min(o, c) - l, 0.0) / rng  # 下影占比
+    upper_w = max(h - max(o, c), 0.0) / rng  # 上影占比
+
+    # 5) 过滤掉已经确认突破的情况
+    if breakout_up and near_top:
+        return None, None
+    if breakout_down and near_bottom:
+        return None, None
+
+    # 6) 顶部边缘拒绝 → 空
+    #    要求：靠近上沿 + 上影 >= 40% + K 线收回箱体内部（不是收在新高外）
+    if near_top:
+        if upper_w >= 0.4 and c < h and c < range_top:
+            return "range_reject_short", range_top
+
+    # 7) 底部边缘拒绝 → 多
+    #    要求：靠近下沿 + 下影 >= 40% + 收回箱体内部
+    if near_bottom:
+        if lower_w >= 0.4 and c > l and c > range_bottom:
+            return "range_reject_long", range_bottom
+
+    return None, None
+
+
 # ===== 价格行为 PA =====
 
 
@@ -1032,6 +1126,107 @@ def signal_exhaustion_reversal(
     return None, None
 
 
+def signal_volume_climax(
+    trend_dir: Optional[str],
+    pct_now: float,
+    volr_now: float,
+    atr_abs: float,
+    o: float,
+    h: float,
+    l: float,
+    c: float,
+):
+    """
+    成交量高潮反转（Volume Climax Reversal）
+    - 前提：已经存在明确的单边趋势（trend_dir != None）
+    - 条件：极端放量（VolR 很高）+ 超过 ATR 的长 K + 影线偏向趋势反向方向
+    返回:
+        ("volume_climax_long/short", level) or (None, None)
+    """
+    if trend_dir is None or atr_abs is None or atr_abs <= 0:
+        return None, None
+
+    # 极端放量门槛（可以以后调）
+    if volr_now < 3.0:
+        return None, None
+
+    rng = max(h - l, 1e-12)
+    # 下影/上影占比
+    lower_w = max(min(o, c) - l, 0.0) / rng
+    upper_w = max(h - max(o, c), 0.0) / rng
+
+    # 要求整根 K 的波动至少 >= 1.2 * ATR
+    if rng < atr_abs * 1.2:
+        return None, None
+
+    # --- 下跌趋势中的“底部高潮反转 · 多” ---
+    if trend_dir == "down":
+        # 阳线 + 下影明显 + 有一定反弹幅度
+        if c > o and lower_w >= 0.5 and pct_now >= 0.5:
+            return "volume_climax_long", c
+
+    # --- 上涨趋势中的“顶部高潮反转 · 空” ---
+    if trend_dir == "up":
+        # 阴线 + 上影明显 + 有一定回落幅度
+        if c < o and upper_w >= 0.5 and pct_now <= -0.5:
+            return "volume_climax_short", c
+
+    return None, None
+
+
+def signal_rubber_band(
+    HTF_BULL: bool,
+    HTF_BEAR: bool,
+    ema20_h4: float,
+    atr_abs: float,
+    c: float,
+    pct_now: float,
+    volr_now: float,
+    o: float,
+):
+    """
+    橡皮筋回归（Rubber-Band Reversion）
+    - 多头结构下：价格向下偏离 4h EMA20 至少 ~2 个 ATR 后出现反向阳线 + 略放量
+    - 空头结构下：价格向上偏离 4h EMA20 至少 ~2 个 ATR 后出现反向阴线 + 略放量
+    返回:
+        ("rubber_band_long/short", level) or (None, None)
+    """
+    if (
+        ema20_h4 is None
+        or np.isnan(ema20_h4)
+        or atr_abs is None
+        or atr_abs <= 0
+        or c <= 0
+    ):
+        return None, None
+
+    dist_abs = c - float(ema20_h4)
+    dist_pct = dist_abs / c * 100.0
+    atr_pct = atr_abs / c * 100.0
+
+    # 轻微放量门槛
+    if volr_now < 1.5:
+        return None, None
+
+    # --- 多头结构下：杀过头，可能反弹 ---
+    if HTF_BULL:
+        # 距 EMA20 至少 2 ATR，向下过度扩展
+        if dist_pct <= -2.0 * atr_pct:
+            # 当前 K 为阳线 + 有一定涨幅
+            if c > o and pct_now >= 0.5:
+                return "rubber_band_long", ema20_h4
+
+    # --- 空头结构下：拉过头，可能回落 ---
+    if HTF_BEAR:
+        # 距 EMA20 至少 2 ATR，向上过度扩展
+        if dist_pct >= 2.0 * atr_pct:
+            # 当前 K 为阴线 + 有一定跌幅
+            if c < o and pct_now <= -0.5:
+                return "rubber_band_short", ema20_h4
+
+    return None, None
+
+
 # =========================
 # 主 detect_signal 函数
 # =========================
@@ -1123,6 +1318,33 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
 
     dist_day_high_pct = ((dh - c) / c * 100.0) if (dh and c > 0) else None
     dist_day_low_pct = ((c - dl) / c * 100.0) if (dl and c > 0) else None
+
+    # ===== 资金费率（期货特有）=====
+    funding_rate = None  # 原始数值，例如 0.0001
+    funding_rate_pct = None  # 转换后的百分比，例如 0.01
+    funding_side = ""  # "long_pays_short" / "short_pays_long" / "neutral"
+    funding_text = ""  # 给 reasons 用的中文提示
+
+    try:
+        fr, fr_ts, fr_raw = _fetch_funding_rate_safe(ex, symbol)
+        if fr is not None:
+            funding_rate = float(fr)
+            funding_rate_pct = funding_rate * 100.0
+            if funding_rate > 0:
+                funding_side = "long_pays_short"
+                funding_text = f"资金费率≈{funding_rate_pct:.4f}%（多头支付空头）"
+            elif funding_rate < 0:
+                funding_side = "short_pays_long"
+                funding_text = f"资金费率≈{funding_rate_pct:.4f}%（空头支付多头）"
+            else:
+                funding_side = "neutral"
+                funding_text = "资金费率≈0.0000%（多空中性）"
+    except Exception as e:
+        dbg(f"[DETECT] {symbol}: funding_rate calc error: {e}")
+        funding_rate = None
+        funding_rate_pct = None
+        funding_side = ""
+        funding_text = ""
 
     # ===== H1 指标（RSI / ADX / ATR）=====
     closes_h1 = hist["close"].astype(float).values
@@ -1323,21 +1545,21 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
             if touch_resist and c < ll:
                 breakout_retest_short = True
 
-    # ===== 新信号 3：区间边缘拒绝（range_reject）=====
-    range_reject_long = False
-    range_reject_short = False
-    range_top = hh if hh > near_R else near_R
-    range_bottom = ll if ll < near_S else near_S
-    range_width = range_top - range_bottom
-    if range_width > 0:
-        pos_in_range = (c - range_bottom) / range_width  # 0~1
-        near_top = pos_in_range >= 0.8
-        near_bottom = pos_in_range <= 0.2
-
-        if near_top and upper_w >= 0.4 and not breakout_up:
-            range_reject_short = True
-        if near_bottom and lower_w >= 0.4 and not breakout_down:
-            range_reject_long = True
+    # ===== 新信号：区间边缘拒绝（升级版）=====
+    kind_rr, lvl_rr = signal_range_reject(
+        c=c,
+        o=o,
+        h=h,
+        l=l,
+        hh=hh,
+        ll=ll,
+        atr_abs=atr_abs,
+        adx=adx,
+        near_R=near_R,
+        near_S=near_S,
+        breakout_up=breakout_up,
+        breakout_down=breakout_down,
+    )
 
     # ===== 新信号 4：H1 强双顶 / 双底（结构 + RSI 背离 + 颈线确认）=====
     double_top = False
@@ -1411,6 +1633,32 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         c=c,
     )
 
+    # ===== 新信号：成交量高潮反转（Volume Climax） =====
+    # 基于 H1 的最近单边趋势方向（给衰竭/高潮类信号使用）
+    trend_dir_for_ext, trend_pct_ext = _recent_trend_dir(closes_h1, atr_arr, N=12)
+    kind_vc, lvl_vc = signal_volume_climax(
+        trend_dir=trend_dir_for_ext,
+        pct_now=pct_now,
+        volr_now=volr_now,
+        atr_abs=atr_abs,
+        o=o,
+        h=h,
+        l=l,
+        c=c,
+    )
+
+    # ===== 新信号：HTF 橡皮筋回归（Rubber-Band Reversion）=====
+    kind_rb, lvl_rb = signal_rubber_band(
+        HTF_BULL=HTF_BULL,
+        HTF_BEAR=HTF_BEAR,
+        ema20_h4=ema20_h4,
+        atr_abs=atr_abs,
+        c=c,
+        pct_now=pct_now,
+        volr_now=volr_now,
+        o=o,
+    )
+
     # ===== 汇总所有候选信号 =====
     candidates = []
 
@@ -1436,11 +1684,10 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     if breakout_retest_short:
         candidates.append(("breakout_retest_short", "跌破后回踩区间下沿遇阻下行"))
 
-    # 新增：区间边缘拒绝
-    if range_reject_long:
-        candidates.append(("range_reject_long", "区间下沿附近长下影线承接"))
-    if range_reject_short:
-        candidates.append(("range_reject_short", "区间上沿附近长上影线受阻"))
+    if kind_rr == "range_reject_long":
+        candidates.append(("range_reject_long", "区间边缘拒绝 · 下沿承接"))
+    elif kind_rr == "range_reject_short":
+        candidates.append(("range_reject_short", "区间边缘拒绝 · 上沿受阻"))
 
     # 新增：强双顶 / 双底
     if double_top:
@@ -1452,6 +1699,20 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         candidates.append(("exhaustion_reversal_long", "趋势衰竭 · V 型反转 · 多"))
     elif kind_exh == "exhaustion_reversal_short":
         candidates.append(("exhaustion_reversal_short", "趋势衰竭 · V 型反转 · 空"))
+
+    if kind_vc == "volume_climax_long":
+        candidates.append(("volume_climax_long", "极端放量 · 底部高潮反转"))
+    elif kind_vc == "volume_climax_short":
+        candidates.append(("volume_climax_short", "极端放量 · 顶部高潮反转"))
+
+    if kind_rb == "rubber_band_long":
+        candidates.append(
+            ("rubber_band_long", "橡皮筋回归 · 多（4h 多头结构超跌修复）")
+        )
+    elif kind_rb == "rubber_band_short":
+        candidates.append(
+            ("rubber_band_short", "橡皮筋回归 · 空（4h 空头结构超涨回落）")
+        )
 
     if not candidates:
         dbg(f"[DETECT] {symbol}: no signal candidates, return False")
@@ -1469,6 +1730,10 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "htf_trend_pullback_short": 3,
         "exhaustion_reversal_long": 3,
         "exhaustion_reversal_short": 3,
+        "volume_climax_long": 3,
+        "volume_climax_short": 3,
+        "rubber_band_long": 4,
+        "rubber_band_short": 4,
         "wick_bottom": 4,
         "wick_top": 4,
         "range_reject_long": 5,
@@ -1489,6 +1754,8 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
             "range_reject_long",
             "exhaustion_reversal_long",
             "double_bottom",
+            "volume_climax_long",
+            "rubber_band_long",
         )
         else "short"
     )
@@ -1528,6 +1795,9 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         reasons.append(f"上方阻力≈{near_R:.6g}（ΔR≈{dist_R:.2f}%）")
     if near_S is not None and dist_S is not None:
         reasons.append(f"下方支撑≈{near_S:.6g}（ΔS≈{dist_S:.2f}%）")
+    # 资金费率提示
+    if funding_text:
+        reasons.append(funding_text)
 
     # ===== 组装 payload =====
     fallback_kind_cn = {
@@ -1545,6 +1815,10 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "double_bottom": "双底反转 · 多",
         "exhaustion_reversal_long": "趋势衰竭反转 · 多",
         "exhaustion_reversal_short": "趋势衰竭反转 · 空",
+        "volume_climax_long": "极端放量高潮反转 · 多",
+        "volume_climax_short": "极端放量高潮反转 · 空",
+        "rubber_band_long": "橡皮筋回归 · 多",
+        "rubber_band_short": "橡皮筋回归 · 空",
     }
     kind_cn = KINDS_CN.get(kind, fallback_kind_cn.get(kind, kind))
 
@@ -1584,6 +1858,9 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "sr_levels_resistance": sr_levels_res,
         "sr_levels_support": sr_levels_sup,
         "sr_band_abs": sr_band_abs,
+        "funding_rate": funding_rate,  # 原始值，例如 0.0001
+        "funding_rate_pct": funding_rate_pct,  # 百分比，例如 0.01
+        "funding_side": funding_side,  # long_pays_short / short_pays_long / neutral
     }
 
     dbg(

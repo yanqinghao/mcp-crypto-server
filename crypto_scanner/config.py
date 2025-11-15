@@ -76,6 +76,12 @@ KINDS_CN = {
     "bb_squeeze_short": "布林挤压 · 下破",
     "cap_long": "疑似止跌 · 长下影",
     "cap_short": "疑似见顶 · 长上影",
+    "exhaustion_reversal_long": "趋势衰竭反转 · 多",
+    "exhaustion_reversal_short": "趋势衰竭反转 · 空",
+    "volume_climax_long": "极端放量高潮反转 · 多",
+    "volume_climax_short": "极端放量高潮反转 · 空",
+    "rubber_band_long": "橡皮筋回归 · 多",
+    "rubber_band_short": "橡皮筋回归 · 空",
 }
 
 # 流动性&粗糙度（15m）
