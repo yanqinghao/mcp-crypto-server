@@ -17,7 +17,7 @@ from .formatter import format_signal_cn
 PENDING_DELETES = []
 
 
-def telegram_send(text: str, parse_mode="HTML", retries: int = 3, backoff: float = 1.0):
+def telegram_send(text: str, parse_mode="HTML", retries: int = 5, backoff: float = 1.0):
     """
     向 Telegram 发送消息，带重试机制。
     :param text: 消息文本

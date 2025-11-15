@@ -1,24 +1,44 @@
 # -*- coding: utf-8 -*-
 """
-formatter.py (融合版 + SR参考·精简 Top3)
-在你原有版式基础上，保持原字段与格式，SR区块改为：
-- 仅展示“最近阻力/支撑”以及“最多3个阻力 / 3个支撑”的紧凑行
-- 最近一档加粗并打 ⭐ 标
+formatter.py (下单指令版 + 风险提示增强)
+通知格式类似：
+
+TRUMP/USDT:USDT｜长下影反转｜方向：多
+现价：7.119
+日内最高/最低：7.767 / 6.903
+阻力：7.18（0.74%）
+支撑：7.103（0.34%）
+
+市价建议：
+  · /forcelong TRUMP/USDT:USDT 10 10
+
+限价建议：
+  · /forcelong TRUMP/USDT:USDT 10 10 7.103
+
+止损参考：6.987
+
+提示：
+  · ⚠️ 高周期偏空，当前做多属于逆势，建议轻仓或放弃。
+  · ✅ 止损距离当前价约 2.10%，风险区间较合理。
 """
+
+from typing import Optional
 
 from .config import (
     KINDS_CN,
-    PRINT_FULL_REASONS,
-    MAX_REASONS_IN_MSG,
-    SEPARATOR_LINE,
+    SAFE_MODE_ALWAYS,  # 目前只用于“是否一定展示 SL”，保留
 )
+
+# 你可以按自己的习惯改这两个默认值
+DEFAULT_LEVERAGE = 10
+DEFAULT_SIZE = 10
 
 
 def _fmt_price(x):
     if x is None:
         return "—"
     try:
-        return f"{x:.6g}"
+        return f"{float(x):.6g}"
     except Exception:
         return str(x)
 
@@ -32,161 +52,259 @@ def _fmt_pct(x):
         return str(x)
 
 
-def _fmt_gate(p):
+def _infer_side(kind: str, side_hint: Optional[str] = None) -> str:
+    """
+    从 kind 推方向；payload 里如果有 side，就优先用。
+    """
+    if side_hint in ("long", "short"):
+        return side_hint
+
+    k = (kind or "").lower()
+
+    long_kinds = {
+        "breakout_up",
+        "wick_bottom",
+        "range_rebound_long",
+        "eqb_rebound_long",
+        "double_bottom",
+        "htf_trend_pullback_long",
+        "breakout_retest_long",
+        "range_reject_long",
+        "exhaustion_reversal_long",
+    }
+    short_kinds = {
+        "breakout_down",
+        "wick_top",
+        "range_rebound_short",
+        "eqb_rebound_short",
+        "double_top",
+        "htf_trend_pullback_short",
+        "breakout_retest_short",
+        "range_reject_short",
+        "exhaustion_reversal_short",
+    }
+
+    if k in long_kinds:
+        return "long"
+    if k in short_kinds:
+        return "short"
+
+    # 默认当多处理
+    return "long"
+
+
+def _risk_hints(p: dict, side: str, last_price, sl_price) -> list[str]:
+    """
+    风险提示区块：
+    - HTF 顺/逆势
+    - 日内高低位置
+    - 阻力/支撑空间
+    - 止损距离是否合理
+    """
+    hints: list[str] = []
+
     gate = (p.get("htf_gate") or "").strip().upper()
-    if gate in ("BULL", "BEAR"):
-        return gate
-    if p.get("htf_bull"):
-        return "BULL"
-    if p.get("htf_bear"):
-        return "BEAR"
-    return "—"
+    htf_bull = bool(p.get("htf_bull"))
+    htf_bear = bool(p.get("htf_bear"))
 
+    # ===== HTF 大趋势顺/逆势 =====
+    if (gate == "BULL" or htf_bull) and side == "short":
+        hints.append("⚠️ 高周期偏多，当前做空属于逆势，建议减仓或放弃。")
+    if (gate == "BEAR" or htf_bear) and side == "long":
+        hints.append("⚠️ 高周期偏空，当前做多属于逆势，建议轻仓。")
 
-def _badges(p):
-    tags = []
-    if p.get("_confirm_tag"):
-        tags.append(p["_confirm_tag"])
-    if p.get("_risk_tag"):
-        tags.append(p["_risk_tag"])
-    return " ".join(tags)
+    # ===== 日内位置（接近高/低点）=====
+    dist_day_high = p.get("dist_day_high_pct")
+    dist_day_low = p.get("dist_day_low_pct")
 
+    # 对多单：靠近日内高点 → 小心追多；靠近日内低点 → 性价比高
+    if side == "long":
+        if dist_day_high is not None and dist_day_high < 0.5:
+            hints.append("⚠️ 价格接近日内高点，上行空间有限，追多需谨慎。")
+        if (
+            dist_day_low is not None
+            and dist_day_low < 0.5
+            and (dist_day_high is None or dist_day_high > 1.5)
+        ):
+            hints.append("📉 价格接近日内低位，性价比较好，可关注潜在反弹。")
 
-def _pull_reasons(p):
-    # 1) 优先结构化 reasons
-    reasons = p.get("reasons")
-    if isinstance(reasons, list) and reasons:
-        out = [str(r).strip() for r in reasons if str(r).strip()]
-        if not PRINT_FULL_REASONS:
-            out = out[:MAX_REASONS_IN_MSG]
-        return out
-    # 2) 兜底：从 text_core 中抽取 "Why: " 行
-    tc = p.get("text_core") or []
-    for line in tc:
-        if isinstance(line, str) and line.startswith("Why: "):
-            content = line[5:].strip()
-            if content:
-                parts = [x.strip() for x in content.split(";") if x.strip()]
-                if not PRINT_FULL_REASONS:
-                    parts = parts[:MAX_REASONS_IN_MSG]
-                return parts
-    return []
+    # 对空单：靠近日内低点 → 小心追空；靠近日内高点 → 做空性价比高
+    if side == "short":
+        if dist_day_low is not None and dist_day_low < 0.5:
+            hints.append("⚠️ 价格接近日内低点，下行空间有限，追空需谨慎。")
+        if (
+            dist_day_high is not None
+            and dist_day_high < 0.5
+            and (dist_day_low is None or dist_day_low > 1.5)
+        ):
+            hints.append("📈 价格接近日内高点，做空性价比相对更好。")
 
+    # ===== SR 空间提示 =====
+    dist_R = p.get("sr_dist_to_resistance_pct")
+    dist_S = p.get("sr_dist_to_support_pct")
 
-# ===== SR（精简 Top3） =====
-def _fmt_sr_compact(levels, current, nearest_price, is_resistance=True, topn=3):
-    """
-    levels: detect 注入的 sr_levels_resistance / sr_levels_support
-    current: last_price
-    nearest_price: sr_near_resistance / sr_near_support
-    is_resistance: True=阻力；False=支撑
-    输出示例：R: ⭐ 8.064(+0.35%), 8.157(+1.57%), 8.221(+2.37%)
-    """
-    if not isinstance(levels, list) or current is None or current == 0:
-        prefix = "R" if is_resistance else "S"
-        return f"{prefix}：—"
-
-    rows = []
-    # 只取前 topn 个（detect 里已经按“上方升序/下方降序”贴近现价排序过）
-    for x in levels[:topn]:
-        price = x.get("price")
+    if side == "long" and dist_R is not None:
         try:
-            gap = (float(price) - float(current)) / float(current) * 100.0
-            gap_str = f"{gap:+.2f}%"
+            d = float(dist_R)
+            if d < 1.0:
+                hints.append(f"⚠️ 上方最近阻力仅约 {_fmt_pct(d)}，目标空间较窄。")
+            elif d > 3.0:
+                hints.append(f"📈 上方阻力尚有约 {_fmt_pct(d)} 空间，可关注。")
         except Exception:
-            gap_str = "—"
-        # 最近位加 ⭐ 与加粗
-        if nearest_price is not None and price == nearest_price:
-            rows.append(f"⭐ <b>{_fmt_price(price)}({_fmt_pct(gap)})</b>")
+            pass
+
+    if side == "short" and dist_S is not None:
+        try:
+            d = float(dist_S)
+            if d < 1.0:
+                hints.append(f"⚠️ 下方最近支撑仅约 {_fmt_pct(d)}，下跌空间有限。")
+            elif d > 3.0:
+                hints.append(f"📉 距离下方主要支撑尚有约 {_fmt_pct(d)} 空间。")
+        except Exception:
+            pass
+
+    # ===== 止损距离合理性 =====
+    loss_pct = None
+    try:
+        lp = float(last_price) if last_price is not None else None
+        sp = float(sl_price) if sl_price is not None else None
+        if lp and sp:
+            if side == "long" and sp < lp:
+                loss_pct = (lp - sp) / lp * 100.0
+            elif side == "short" and sp > lp:
+                loss_pct = (sp - lp) / lp * 100.0
+    except Exception:
+        loss_pct = None
+
+    if loss_pct is not None:
+        if loss_pct < 0.5:
+            hints.append(
+                "⚠️ 止损距离非常近，容易被来回扫，考虑适当放宽或寻找更好结构点。"
+            )
+        elif loss_pct > 4.0:
+            hints.append("⚠️ 止损距离较远，注意控制仓位，避免单笔风险过大。")
         else:
-            rows.append(f"{_fmt_price(price)}({_fmt_pct(gap)})")
+            hints.append(
+                f"✅ 止损距离当前价约 {_fmt_pct(loss_pct)}，风险区间相对合理。"
+            )
 
-    prefix = "R" if is_resistance else "S"
-    return f"{prefix}：{', '.join(rows) if rows else '—'}"
+    return hints
 
 
-def format_signal_cn(p):
-    symbol = p["symbol"]
-    kind = p["kind"]
-    kind_cn = p.get("kind_cn") or KINDS_CN.get(kind, p.get("title", kind))
+def format_signal_cn(p: dict) -> str:
+    """
+    detect_signal → 文本格式（无 HTML）
+    主体结构：
+    1) 头部 + 价格 + SR
+    2) 市价/限价建议
+    3) 止损参考
+    4) 提示（风险&位置&SL 合理性 + 结构 SR 列表）
+    """
+    symbol = p.get("symbol", "?")
+    kind = str(p.get("kind", "") or "")
+    kind_cn = p.get("kind_cn") or KINDS_CN.get(kind, kind) or kind
 
-    now_pct = f"{p['pct_now']:.2f}%"
-    volr = f"{p['volr_now']:.2f}x"
-    eqbar_now = f"${p['eq_now_bar_usd']:,.0f}"
-    vps_pair = f"{p['vps_now']:.4f} / {p['vps_base']:.4f}"
-    trend_txt = p.get("trend_text", "")
+    # === 方向 ===
+    side = _infer_side(kind, p.get("side"))
+    side_cn = "多" if side == "long" else "空"
+    side_emoji = "📈" if side == "long" else "📉"
 
-    dh = p.get("day_high")
-    dl = p.get("day_low")
-    pct24 = p.get("pct24")
-    dh_str = f"{dh:.6g}" if isinstance(dh, (int, float)) else "—"
-    dl_str = f"{dl:.6g}" if isinstance(dl, (int, float)) else "—"
-    pct24_str = f"{pct24:.2f}%" if isinstance(pct24, (int, float)) else "—"
+    # === 价格数据 ===
+    last_price = p.get("last_price") or p.get("close") or p.get("c")
+    day_high = p.get("day_high")
+    day_low = p.get("day_low")
 
-    dhi = p.get("dist_day_high_pct")
-    dli = p.get("dist_day_low_pct")
-    dhi_str = f"{dhi:+.2f}%" if isinstance(dhi, (int, float)) else "—"
-    dli_str = f"{dli:+.2f}%" if isinstance(dli, (int, float)) else "—"
+    near_R = p.get("sr_near_resistance")
+    near_S = p.get("sr_near_support")
+    dist_R = p.get("sr_dist_to_resistance_pct")
+    dist_S = p.get("sr_dist_to_support_pct")
 
-    # HTF 闸门 & 徽标
-    htf_gate = _fmt_gate(p)
-    badges = _badges(p)
-    title_line = f"<b>{symbol}</b>｜<b>{kind_cn}</b>｜HTF：<b>{htf_gate}</b>"
-    if badges:
-        title_line = f"{badges} {title_line}"
+    sl_price = p.get("sl_price")
 
-    # 触发原因（尽量短）
-    reasons_out = _pull_reasons(p)
-    if not reasons_out and p.get("reasons"):
-        reasons_out = p["reasons"]
-        if not PRINT_FULL_REASONS:
-            reasons_out = reasons_out[:MAX_REASONS_IN_MSG]
-    why = "；".join(reasons_out) if reasons_out else "—"
+    # 结构 SR 列表（来自 detect_signal payload）
+    sr_res_list = p.get("sr_levels_resistance") or []
+    sr_sup_list = p.get("sr_levels_support") or []
 
-    # 指令
-    cmd_lines = []
-    # if (not SAFE_MODE_ALWAYS) and p.get("cmd_immd"):
-    #     cmd_lines.append(p["cmd_immd"])
-    if p.get("cmd_safe"):
-        cmd_lines.append(p["cmd_safe"])
-    cmds = "\n".join([f"  · {x}" for x in cmd_lines]) if cmd_lines else "  · —"
-
-    # ===== SR（精简显示）=====
-    last_px = p.get("last_price") or p.get("price_now")
-
-    sr_nr = p.get("sr_near_resistance")
-    sr_ns = p.get("sr_near_support")
-    sr_dr = p.get("sr_dist_to_resistance_pct")
-    sr_ds = p.get("sr_dist_to_support_pct")
-
-    sr_R = p.get("sr_levels_resistance") or []
-    sr_S = p.get("sr_levels_support") or []
-
-    # 第一行：最近阻力/支撑（只给出数值和Δ）
-    sr_near_line = (
-        "SR参考："
-        f"最近阻力 <b>{_fmt_price(sr_nr)}</b>（ΔR={_fmt_pct(sr_dr) if isinstance(sr_dr, (int, float)) else '—'}）｜"
-        f"最近支撑 <b>{_fmt_price(sr_ns)}</b>（ΔS={_fmt_pct(sr_ds) if isinstance(sr_ds, (int, float)) else '—'}）"
-    )
-
-    # 第二行&第三行：Top3 紧凑行（最近位加 ⭐）
-    sr_R_line = _fmt_sr_compact(sr_R, last_px, sr_nr, is_resistance=True, topn=3)
-    sr_S_line = _fmt_sr_compact(sr_S, last_px, sr_ns, is_resistance=False, topn=3)
-
-    block = [
-        SEPARATOR_LINE,
-        title_line,
-        f"现价{p['timeframe_fast']}涨跌：<b>{now_pct}</b>   量速倍数：<b>{volr}</b>   等效本bar成交额：<b>{eqbar_now}</b>",
-        f"日内最高/最低：<b>{dh_str}</b> / <b>{dl_str}</b>   24h涨跌：<b>{pct24_str}</b>",
-        f"距日高/距日低：<b>{dhi_str}</b> / <b>{dli_str}</b>",
-        f"现价：<b>{_fmt_price(last_px)}</b>",
-        f"成交速率(vps)：{vps_pair}   趋势：{trend_txt}",
-        f"触发原因：{why}",
-        # —— SR（三行搞定）——
-        sr_near_line,
-        sr_R_line,
-        sr_S_line,
-        "入场命令：",
-        cmds,
+    # ===== 头部 =====
+    # 例：📈 TRUMP/USDT:USDT｜长下影反转｜方向：多
+    lines: list[str] = [
+        f"{side_emoji} {symbol}｜{kind_cn}｜方向：{side_cn}",
     ]
-    return "\n".join(block)
+
+    if last_price is not None:
+        lines.append(f"现价：{_fmt_price(last_price)}")
+
+    if day_high is not None or day_low is not None:
+        lines.append(f"日内最高/最低：{_fmt_price(day_high)} / {_fmt_price(day_low)}")
+
+    # SR 信息（最近一上/一下）
+    if near_R is not None and dist_R is not None:
+        lines.append(f"阻力：{_fmt_price(near_R)}（{_fmt_pct(dist_R)}）")
+    if near_S is not None and dist_S is not None:
+        lines.append(f"支撑：{_fmt_price(near_S)}（{_fmt_pct(dist_S)}）")
+
+    lines.append("")
+
+    # ===== 市价建议 =====
+    if side == "long":
+        cmd_mkt = f"<code>/forcelong {symbol} {DEFAULT_LEVERAGE} {DEFAULT_SIZE}</code>"
+    else:
+        cmd_mkt = f"<code>/forceshort {symbol} {DEFAULT_LEVERAGE} {DEFAULT_SIZE}</code>"
+
+    lines.append("市价建议：")
+    lines.append(f"  · {cmd_mkt}")
+    lines.append("")
+
+    # ===== 限价建议 =====
+    if side == "long":
+        entry_price = near_S or last_price
+        cmd_lmt = f"<code>/forcelong {symbol} {DEFAULT_LEVERAGE} {DEFAULT_SIZE} {_fmt_price(entry_price)}</code>"
+    else:
+        entry_price = near_R or last_price
+        cmd_lmt = f"<code>/forceshort {symbol} {DEFAULT_LEVERAGE} {DEFAULT_SIZE} {_fmt_price(entry_price)}</code>"
+
+    lines.append("限价建议：")
+    lines.append(f"  · {cmd_lmt}")
+
+    # ===== 止损参考（受 SAFE_MODE_ALWAYS 控制）=====
+    if sl_price is not None and SAFE_MODE_ALWAYS:
+        lines.append("")
+        lines.append(f"止损参考：{_fmt_price(sl_price)}")
+
+    # ===== 风险提示 & 结构 SR =====
+    hints = _risk_hints(p, side, last_price, sl_price)
+
+    # 只要有风险提示 or 有 SR 列表，就展示“提示：”区块
+    if hints or sr_res_list or sr_sup_list:
+        lines.append("")
+        lines.append("提示：")
+
+        # 先展示结构 SR（最多 3 个阻力 + 3 个支撑）
+        if (sr_res_list or sr_sup_list) and last_price is not None:
+            lines.append("  · 结构 SR：")
+
+            # 上方阻力
+            for i, price in enumerate(sr_res_list[:3], 1):
+                try:
+                    lp = float(last_price)
+                    p_val = float(price)
+                    gap = (p_val - lp) / lp * 100.0
+                    lines.append(f"    R{i}: {_fmt_price(p_val)}（{_fmt_pct(gap)}）")
+                except Exception:
+                    lines.append(f"    R{i}: {_fmt_price(price)}")
+
+            # 下方支撑
+            for i, price in enumerate(sr_sup_list[:3], 1):
+                try:
+                    lp = float(last_price)
+                    p_val = float(price)
+                    gap = (p_val - lp) / lp * 100.0
+                    lines.append(f"    S{i}: {_fmt_price(p_val)}（{_fmt_pct(gap)}）")
+                except Exception:
+                    lines.append(f"    S{i}: {_fmt_price(price)}")
+
+        # 再展示风险提示
+        for h in hints:
+            lines.append(f"  · {h}")
+
+    return "\n".join(lines)
