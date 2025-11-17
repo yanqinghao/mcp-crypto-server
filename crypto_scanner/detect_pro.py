@@ -795,7 +795,7 @@ def signal_range_break(h1_closes):
     区间突破：最后5根区间 + 突破
     """
     window = h1_closes[-6:-1]
-    if not window:
+    if len(window) == 0:
         return None, None
 
     last = h1_closes[-1]
@@ -866,6 +866,10 @@ def signal_range_reject(
     range_bottom = min(bottom_candidates)
     range_width = range_top - range_bottom
     if range_width <= 0:
+        return None, None
+
+    range_width_pct = range_width / c * 100.0
+    if range_width_pct < 0.8:  # 比如区间高度 < 0.8% 就不认
         return None, None
 
     # 3) 定义“边缘带宽”：边界 ± max(0.8*ATR, 0.25%价格)
@@ -1333,6 +1337,193 @@ def detect_double_top_bottom(
     return double_top, double_bottom
 
 
+def signal_hidden_divergence(
+    closes_h1: np.ndarray,
+    rsi_series: np.ndarray,
+    atr_arr: np.ndarray,
+    HTF_BULL: bool,
+    HTF_BEAR: bool,
+) -> Tuple[Optional[str], Optional[float]]:
+    """
+    隐藏背离（Hidden Divergence）：
+    - 多头：上涨趋势 + 低点抬高（HL）但 RSI 低点变低（LL） → 顺势多头续航
+    - 空头：下跌趋势 + 高点降低（LH）但 RSI 高点变高（HH） → 顺势空头续航
+
+    返回:
+        ("hidden_div_long/short", 参考价位) 或 (None, None)
+    """
+    closes = np.asarray(closes_h1, dtype=float)
+    rsi_series = np.asarray(rsi_series, dtype=float)
+    atr_arr = np.asarray(atr_arr, dtype=float)
+
+    n = len(closes)
+    if n < 40 or len(atr_arr) < 20:
+        return None, None
+
+    c = float(closes[-1])
+    if c <= 0:
+        return None, None
+
+    atr_now_raw = atr_arr[-1]
+    atr_now = float(atr_now_raw) if not np.isnan(atr_now_raw) else 0.0
+
+    # 最近一段整体方向（价格本身）
+    trend_dir, trend_pct = _recent_trend_dir(closes, atr_arr, N=12)
+
+    # 参数可以以后抽成配置
+    min_bars_between = 3
+    max_bars_between = 40
+    min_price_move_atr = 0.3  # pivot 之间至少 0.3 ATR
+    min_price_move_pct = 0.3  # 或 0.3%
+    min_rsi_diff = 0.8  # RSI 差至少 ~0.8
+    confirm_pct = 0.3  # 当前价相对第二个 pivot 有一点确认
+
+    # ============ 多头隐藏背离 ============ #
+    # 要求：HTF_BULL + 短期价格确实有 uptrend
+    if HTF_BULL and trend_dir == "up":
+        swing_lows = []
+        for i in range(2, n - 2):
+            if swing_low(closes, i, left=2, right=2):
+                swing_lows.append(i)
+
+        if len(swing_lows) >= 2:
+            j1, j2 = swing_lows[-2], swing_lows[-1]
+            bars_between = j2 - j1
+            if min_bars_between <= bars_between <= max_bars_between:
+                p1, p2 = closes[j1], closes[j2]
+                r1_raw, r2_raw = rsi_series[j1], rsi_series[j2]
+                if not np.isnan(r1_raw) and not np.isnan(r2_raw):
+                    r1, r2 = float(r1_raw), float(r2_raw)
+
+                    # 价格 HL + RSI LL
+                    price_move_abs = abs(p2 - p1)
+                    price_move_pct = price_move_abs / max(p1, 1e-12) * 100.0
+                    price_move_ok = False
+                    if atr_now > 0 and price_move_abs >= min_price_move_atr * atr_now:
+                        price_move_ok = True
+                    if price_move_pct >= min_price_move_pct:
+                        price_move_ok = True
+
+                    if p2 > p1 and r2 <= r1 - min_rsi_diff and price_move_ok:
+                        # 当前价略微脱离第二个低点，避免刚刚插针
+                        if c > p2 * (1.0 + confirm_pct / 100.0):
+                            return "hidden_div_long", float(p2)
+
+    # ============ 空头隐藏背离 ============ #
+    # 要求：HTF_BEAR + 短期价格确实有 downtrend
+    if HTF_BEAR and trend_dir == "down":
+        swing_highs = []
+        for i in range(2, n - 2):
+            if swing_high(closes, i, left=2, right=2):
+                swing_highs.append(i)
+
+        if len(swing_highs) >= 2:
+            i1, i2 = swing_highs[-2], swing_highs[-1]
+            bars_between = i2 - i1
+            if min_bars_between <= bars_between <= max_bars_between:
+                p1, p2 = closes[i1], closes[i2]
+                r1_raw, r2_raw = rsi_series[i1], rsi_series[i2]
+                if not np.isnan(r1_raw) and not np.isnan(r2_raw):
+                    r1, r2 = float(r1_raw), float(r2_raw)
+
+                    price_move_abs = abs(p2 - p1)
+                    price_move_pct = price_move_abs / max(p1, 1e-12) * 100.0
+                    price_move_ok = False
+                    if atr_now > 0 and price_move_abs >= min_price_move_atr * atr_now:
+                        price_move_ok = True
+                    if price_move_pct >= min_price_move_pct:
+                        price_move_ok = True
+
+                    # 价格 LH + RSI HH
+                    if p2 < p1 and r2 >= r1 + min_rsi_diff and price_move_ok:
+                        if c < p2 * (1.0 - confirm_pct / 100.0):
+                            return "hidden_div_short", float(p2)
+
+    return None, None
+
+
+def signal_squeeze_breakout(
+    highs_h1: np.ndarray,
+    lows_h1: np.ndarray,
+    closes_h1: np.ndarray,
+    atr_arr: np.ndarray,
+    volr_now: float,
+) -> Tuple[Optional[str], Optional[float]]:
+    """
+    波动收缩 → 扩张突破：
+    - 最近一段 ATR 偏低、价格区间变窄（收缩）
+    - 当前一根波动、量能显著放大，且向上 / 向下突破这段区间
+
+    返回:
+        ("squeeze_breakout_up/down", 边界价) 或 (None, None)
+    """
+    highs = np.asarray(highs_h1, dtype=float)
+    lows = np.asarray(lows_h1, dtype=float)
+    closes = np.asarray(closes_h1, dtype=float)
+    atr_arr = np.asarray(atr_arr, dtype=float)
+
+    n = len(closes)
+    if n < 60 or len(atr_arr) < 30:
+        return None, None
+
+    c = float(closes[-1])
+    h = float(highs[-1])
+    l = float(lows[-1])
+    if c <= 0 or h <= l:
+        return None, None
+
+    # 取最近 N 根来衡量“收缩区间”
+    N = 20
+    seg_high = highs[-N - 1 : -1]
+    seg_low = lows[-N - 1 : -1]
+    seg_atr = atr_arr[-N - 1 : -1]
+
+    if len(seg_high) == 0 or len(seg_low) == 0 or len(seg_atr) == 0:
+        return None, None
+
+    # 去掉 NaN 再算中位 ATR
+    seg_atr_clean = seg_atr[~np.isnan(seg_atr)]
+    if len(seg_atr_clean) == 0:
+        return None, None
+    atr_med = float(np.median(seg_atr_clean))
+    atr_now_raw = atr_arr[-1]
+    atr_now = float(atr_now_raw) if not np.isnan(atr_now_raw) else 0.0
+
+    if atr_med <= 0 or atr_now <= 0:
+        return None, None
+
+    range_high = float(seg_high.max())
+    range_low = float(seg_low.min())
+    range_width = range_high - range_low
+    if range_width <= 0:
+        return None, None
+
+    range_width_pct = range_width / c * 100.0
+
+    # 1) 前一段“收缩”：ATR 偏低 + 区间不宽
+    #    - ATR_now 明显 < ATR 中位数
+    #    - 价格区间 < ~1.5%
+    if not (atr_now < 0.8 * atr_med and range_width_pct < 1.5):
+        return None, None
+
+    # 2) 当前一根“扩张”：波动 & 量能明显放大
+    rng_now = h - l
+    if not (rng_now > 1.2 * atr_med and volr_now >= 2.0):
+        return None, None
+
+    buf = 0.0015  # 0.15% 容差
+
+    # 向上突破
+    if c > range_high * (1.0 + buf):
+        return "squeeze_breakout_up", range_high
+
+    # 向下突破
+    if c < range_low * (1.0 - buf):
+        return "squeeze_breakout_down", range_low
+
+    return None, None
+
+
 # =========================
 # 主 detect_signal 函数
 # =========================
@@ -1422,8 +1613,8 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     dl = float(day_low) if isinstance(day_low, (int, float)) else None
     pct24_val = float(pct24) if isinstance(pct24, (int, float)) else None
 
-    dist_day_high_pct = ((dh - c) / c * 100.0) if (dh and c > 0) else None
-    dist_day_low_pct = ((c - dl) / c * 100.0) if (dl and c > 0) else None
+    dist_day_high_pct = ((dh - c) / c * 100.0) if (dh is not None and c > 0) else None
+    dist_day_low_pct = ((c - dl) / c * 100.0) if (dl is not None and c > 0) else None
 
     # ===== 资金费率（期货特有）=====
     funding_rate = None  # 原始数值，例如 0.0001
@@ -1723,6 +1914,24 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         o=o,
     )
 
+    # ===== 新增信号：隐藏背离（顺势续航）=====
+    kind_hd, lvl_hd = signal_hidden_divergence(
+        closes_h1=closes_h1,
+        rsi_series=rsi_series,
+        atr_arr=atr_arr,
+        HTF_BULL=HTF_BULL,
+        HTF_BEAR=HTF_BEAR,
+    )
+
+    # ===== 新增信号：波动收缩突破（Squeeze Breakout）=====
+    kind_sq, lvl_sq = signal_squeeze_breakout(
+        highs_h1=highs_h1,
+        lows_h1=lows_h1,
+        closes_h1=closes_h1,
+        atr_arr=atr_arr,
+        volr_now=volr_now,
+    )
+
     # ===== 汇总所有候选信号 =====
     candidates = []
 
@@ -1778,6 +1987,18 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
             ("rubber_band_short", "橡皮筋回归 · 空（4h 空头结构超涨回落）")
         )
 
+    # 新增：隐藏背离（顺势续航）
+    if kind_hd == "hidden_div_long":
+        candidates.append(("hidden_div_long", "隐藏背离 · 顺势多头续航"))
+    elif kind_hd == "hidden_div_short":
+        candidates.append(("hidden_div_short", "隐藏背离 · 顺势空头续航"))
+
+    # 新增：波动收缩突破
+    if kind_sq == "squeeze_breakout_up":
+        candidates.append(("squeeze_breakout_up", "波动收缩后向上扩张突破"))
+    elif kind_sq == "squeeze_breakout_down":
+        candidates.append(("squeeze_breakout_down", "波动收缩后向下扩张突破"))
+
     if not candidates:
         dbg(f"[DETECT] {symbol}: no signal candidates, return False")
         return False, None
@@ -1796,6 +2017,10 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "exhaustion_reversal_short": 3,
         "volume_climax_long": 3,
         "volume_climax_short": 3,
+        "hidden_div_long": 3,
+        "hidden_div_short": 3,
+        "squeeze_breakout_up": 2,
+        "squeeze_breakout_down": 2,
         "rubber_band_long": 4,
         "rubber_band_short": 4,
         "wick_bottom": 4,
@@ -1883,6 +2108,10 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "volume_climax_short": "极端放量高潮反转 · 空",
         "rubber_band_long": "橡皮筋回归 · 多",
         "rubber_band_short": "橡皮筋回归 · 空",
+        "hidden_div_long": "隐藏背离 · 顺势多",
+        "hidden_div_short": "隐藏背离 · 顺势空",
+        "squeeze_breakout_up": "波动收缩突破 · 向上",
+        "squeeze_breakout_down": "波动收缩突破 · 向下",
     }
     kind_cn = KINDS_CN.get(kind, fallback_kind_cn.get(kind, kind))
 

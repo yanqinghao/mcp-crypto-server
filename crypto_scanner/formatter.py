@@ -73,6 +73,8 @@ def _infer_side(kind: str, side_hint: Optional[str] = None) -> str:
         "exhaustion_reversal_long",
         "volume_climax_long",
         "rubber_band_long",
+        "hidden_div_long",
+        "squeeze_breakout_up",
     }
     short_kinds = {
         "breakout_down",
@@ -86,6 +88,8 @@ def _infer_side(kind: str, side_hint: Optional[str] = None) -> str:
         "exhaustion_reversal_short",
         "volume_climax_short",
         "rubber_band_short",
+        "hidden_div_short",
+        "squeeze_breakout_down",
     }
 
     if k in long_kinds:
