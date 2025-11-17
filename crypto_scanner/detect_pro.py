@@ -688,34 +688,7 @@ def swing_low(arr, idx, left=2, right=2):
     for i in range(1, right + 1):
         if arr[idx + i] <= p:
             return False
-    for i in range(1, right + 1):
-        if arr[idx + i] <= p:
-            return False
     return True
-
-
-# =========================
-# SR（支撑/阻力）简单检测：关键点极值
-# =========================
-
-
-def detect_sr_levels(h1_closes, window=30):
-    """
-    基于 swing 高低点的简化 SR 检测
-    """
-    n = len(h1_closes)
-    highs = []
-    lows = []
-    for i in range(n):
-        if swing_high(h1_closes, i, 2, 2):
-            highs.append(h1_closes[i])
-        if swing_low(h1_closes, i, 2, 2):
-            lows.append(h1_closes[i])
-
-    highs = sorted(list(set(highs)))
-    lows = sorted(list(set(lows)))
-
-    return highs[-5:], lows[:5]  # 上方阻力5，下方支撑5
 
 
 # =========================
@@ -1227,6 +1200,139 @@ def signal_rubber_band(
     return None, None
 
 
+def detect_double_top_bottom(
+    closes: np.ndarray,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    rsi_series: np.ndarray,
+    atr_arr: np.ndarray,
+    *,
+    min_bars_between: int = 3,
+    max_bars_between: int = 40,
+    max_top_diff_pct: float = 0.6,  # 两个顶/底收盘价高度差 ≤0.6%
+    min_leg_depth_atr: float = 0.8,  # 中间那一笔回落/反弹 ≥ 0.8 ATR
+    min_leg_depth_pct: float = 1.0,  # 或 ≥1%
+    min_break_neck_pct: float = 0.2,  # 突破颈线至少 0.2%
+) -> Tuple[bool, bool]:
+    """
+    使用原来的 swing_high / swing_low（基于 close）做 pivot，
+    high/low 只用于计算颈线和中间一笔的高度。
+
+    返回: (double_top, double_bottom)
+    """
+    double_top = False
+    double_bottom = False
+
+    closes = np.asarray(closes, dtype=float)
+    highs = np.asarray(highs, dtype=float)
+    lows = np.asarray(lows, dtype=float)
+    rsi_series = np.asarray(rsi_series, dtype=float)
+    atr_arr = np.asarray(atr_arr, dtype=float)
+
+    n = len(closes)
+    if n < 40 or len(atr_arr) < 20:
+        return False, False
+
+    c = float(closes[-1])
+    if c <= 0:
+        return False, False
+
+    atr_now = float(atr_arr[-1]) if not np.isnan(atr_arr[-1]) else 0.0
+
+    # 先看最近一段整体方向（你已有的函数）
+    trend_dir, trend_pct = _recent_trend_dir(closes, atr_arr, N=12)
+
+    # =============== 双顶：只在上涨趋势后考虑 ===============
+    if trend_dir == "up":
+        swing_high_idx = []
+        for i in range(2, n - 2):
+            if swing_high(closes, i, left=2, right=2):
+                swing_high_idx.append(i)
+
+        if len(swing_high_idx) >= 2:
+            i1, i2 = swing_high_idx[-2], swing_high_idx[-1]
+            bars_between = i2 - i1
+            if min_bars_between <= bars_between <= max_bars_between:
+                # 高度判断用 close，更稳定
+                p1, p2 = closes[i1], closes[i2]
+                top_diff_pct = abs(p2 - p1) / max(p1, 1e-12) * 100.0
+                if top_diff_pct <= max_top_diff_pct:
+                    # 中间区间 [i1, i2] 用 low 找“谷底”做颈线
+                    seg_lows = lows[i1 : i2 + 1]
+                    if len(seg_lows) >= 3:
+                        neck_low = float(seg_lows.min())
+                        # 深度：顶到颈线的高度
+                        peak_close = max(p1, p2)
+                        depth_abs = peak_close - neck_low
+                        depth_pct = depth_abs / peak_close * 100.0
+
+                        depth_ok = False
+                        if atr_now > 0 and depth_abs >= min_leg_depth_atr * atr_now:
+                            depth_ok = True
+                        if depth_pct >= min_leg_depth_pct:
+                            depth_ok = True
+
+                        if depth_ok and neck_low > 0:
+                            # RSI 背离：第二个顶动能不再增强
+                            v1_raw = rsi_series[i1]
+                            v2_raw = rsi_series[i2]
+                            if not np.isnan(v1_raw) and not np.isnan(v2_raw):
+                                r1 = float(v1_raw)
+                                r2 = float(v2_raw)
+                                # 稍微给 rsi 一点容错
+                                rsi_div = r2 <= r1 + 0.5
+
+                                if rsi_div:
+                                    # 当前价要“有效跌破颈线”
+                                    break_pct = (neck_low - c) / neck_low * 100.0
+                                    if break_pct >= min_break_neck_pct:
+                                        double_top = True
+
+    # =============== 双底：只在下跌趋势后考虑 ===============
+    if trend_dir == "down":
+        swing_low_idx = []
+        for i in range(2, n - 2):
+            if swing_low(closes, i, left=2, right=2):
+                swing_low_idx.append(i)
+
+        if len(swing_low_idx) >= 2:
+            j1, j2 = swing_low_idx[-2], swing_low_idx[-1]
+            bars_between = j2 - j1
+            if min_bars_between <= bars_between <= max_bars_between:
+                p1, p2 = closes[j1], closes[j2]
+                bot_diff_pct = abs(p2 - p1) / max(p1, 1e-12) * 100.0
+                if bot_diff_pct <= max_top_diff_pct:
+                    # 中间区间 [j1, j2] 用 high 找“中间峰”做颈线
+                    seg_highs = highs[j1 : j2 + 1]
+                    if len(seg_highs) >= 3:
+                        neck_high = float(seg_highs.max())
+                        valley_close = min(p1, p2)
+                        height_abs = neck_high - valley_close
+                        height_pct = height_abs / max(neck_high, 1e-12) * 100.0
+
+                        height_ok = False
+                        if atr_now > 0 and height_abs >= min_leg_depth_atr * atr_now:
+                            height_ok = True
+                        if height_pct >= min_leg_depth_pct:
+                            height_ok = True
+
+                        if height_ok and neck_high > 0:
+                            v1_raw = rsi_series[j1]
+                            v2_raw = rsi_series[j2]
+                            if not np.isnan(v1_raw) and not np.isnan(v2_raw):
+                                r1 = float(v1_raw)
+                                r2 = float(v2_raw)
+                                # 第二个底 RSI 不再创新低
+                                rsi_div = r2 >= r1 - 0.5
+
+                                if rsi_div:
+                                    break_pct = (c / neck_high - 1.0) * 100.0
+                                    if break_pct >= min_break_neck_pct:
+                                        double_bottom = True
+
+    return double_top, double_bottom
+
+
 # =========================
 # 主 detect_signal 函数
 # =========================
@@ -1263,7 +1369,7 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         return False, None
 
     if not isinstance(h4, pd.DataFrame) or h4.empty:
-        h4 = h1.copy()
+        h4 = h1_full.copy()
 
     h1 = h1_full.tail(160).copy()
 
@@ -1566,55 +1672,13 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     double_bottom = False
 
     try:
-        prices = closes_h1
-        highs_arr = highs_h1
-        lows_arr = lows_h1
-        n_hist = len(prices)
-
-        if n_hist >= 30:
-            # ---- 双顶 ----
-            swing_high_idx = []
-            for i in range(2, n_hist - 2):
-                if swing_high(prices, i, 2, 2):
-                    swing_high_idx.append(i)
-
-            if len(swing_high_idx) >= 2:
-                i1, i2 = swing_high_idx[-2], swing_high_idx[-1]
-                p1, p2 = prices[i1], prices[i2]
-                if abs(p2 - p1) / max(p1, 1e-12) <= 0.003 and 3 <= i2 - i1 <= 30:
-                    neckline = float(np.min(lows_arr[i1 : i2 + 1]))
-                    r1 = r2 = None
-                    v1 = rsi_series[i1]
-                    v2 = rsi_series[i2]
-                    if not np.isnan(v1):
-                        r1 = float(v1)
-                    if not np.isnan(v2):
-                        r2 = float(v2)
-                    rsi_div = r1 is not None and r2 is not None and r2 <= r1
-                    if rsi_div and neckline > 0 and c < neckline * 0.999:
-                        double_top = True
-
-            # ---- 双底 ----
-            swing_low_idx = []
-            for i in range(2, n_hist - 2):
-                if swing_low(prices, i, 2, 2):
-                    swing_low_idx.append(i)
-
-            if len(swing_low_idx) >= 2:
-                j1, j2 = swing_low_idx[-2], swing_low_idx[-1]
-                p1, p2 = prices[j1], prices[j2]
-                if abs(p2 - p1) / max(p1, 1e-12) <= 0.003 and 3 <= j2 - j1 <= 30:
-                    neckline = float(np.max(highs_arr[j1 : j2 + 1]))
-                    r1 = r2 = None
-                    v1 = rsi_series[j1]
-                    v2 = rsi_series[j2]
-                    if not np.isnan(v1):
-                        r1 = float(v1)
-                    if not np.isnan(v2):
-                        r2 = float(v2)
-                    rsi_div = r1 is not None and r2 is not None and r2 >= r1
-                    if neckline > 0 and rsi_div and c > neckline * 1.001:
-                        double_bottom = True
+        double_top, double_bottom = detect_double_top_bottom(
+            closes=closes_h1,
+            highs=highs_h1,
+            lows=lows_h1,
+            rsi_series=rsi_series,
+            atr_arr=atr_arr,
+        )
     except Exception as e:
         dbg(f"[DETECT] {symbol}: double_top/bottom calc error: {e}")
         double_top = False
