@@ -811,98 +811,76 @@ def signal_range_break(h1_closes):
 
 
 def signal_range_reject(
-    c: float,
-    o: float,
-    h: float,
-    l: float,
-    hh: float,
-    ll: float,
-    atr_abs: float,
-    adx: float,
-    near_R: Optional[float],
-    near_S: Optional[float],
-    breakout_up: bool,
-    breakout_down: bool,
+    c,
+    o,
+    h,
+    l,
+    hh,
+    ll,
+    atr_abs,
+    adx,
+    near_R,
+    near_S,
+    breakout_up,
+    breakout_down,
 ):
-    """
-    区间边缘拒绝（Range Edge Rejection）升级版：
-    使用条件：
-      1) ADX 偏低（弱趋势，认为在箱体/震荡）
-      2) 当前价靠近“区间顶/底”（距边界 <= 边缘带宽）
-      3) 当前 K 线出现与边界方向相反的长影线 + 一定幅度（拒绝而不是突破）
-      4) 当根不能是明显突破（排除 breakout_up / breakout_down）
-
-    返回:
-      ("range_reject_long/short", 边界价) 或 (None, None)
-    """
+    # 基本保护
     if atr_abs is None or atr_abs <= 0 or c <= 0:
         return None, None
 
-    # 1) 只有 ADX 足够低时才认作“区间”
-    #    阈值可以按你口味调，比如 < 20 更严格
-    if adx is not None and adx > 25:
+    # ADX 限制：25 -> 22 （轻微收紧）
+    if adx is not None and adx > 22:
         return None, None
 
-    # 2) 确定区间上下边界：
-    #    - 以最近 hh/ll 为主
-    #    - 如果 SR 近反而更近，就用 SR 做“结构边界”
-    top_candidates = []
-    bottom_candidates = []
-
-    if hh is not None:
-        top_candidates.append(float(hh))
-    if near_R is not None:
-        top_candidates.append(float(near_R))
-
-    if ll is not None:
-        bottom_candidates.append(float(ll))
-    if near_S is not None:
-        bottom_candidates.append(float(near_S))
-
-    if not top_candidates or not bottom_candidates:
+    # 决定区间边界
+    tops = [x for x in [hh, near_R] if x is not None]
+    bottoms = [x for x in [ll, near_S] if x is not None]
+    if not tops or not bottoms:
         return None, None
 
-    range_top = max(top_candidates)
-    range_bottom = min(bottom_candidates)
+    range_top = max(tops)
+    range_bottom = min(bottoms)
     range_width = range_top - range_bottom
     if range_width <= 0:
         return None, None
 
-    range_width_pct = range_width / c * 100.0
-    if range_width_pct < 0.8:  # 比如区间高度 < 0.8% 就不认
+    range_pct = range_width / c * 100
+
+    # 区间必须≥0.9%（原先1.2太高 → 改成中性）
+    if range_pct < 0.9:
         return None, None
 
-    # 3) 定义“边缘带宽”：边界 ± max(0.8*ATR, 0.25%价格)
-    edge_band = max(atr_abs * 0.8, c * 0.0025)
+    # 边缘带宽：0.8ATR → 0.65ATR（适中）
+    edge_band = max(atr_abs * 0.65, c * 0.002)
 
-    # 离上沿/下沿的距离
-    dist_to_top = range_top - c
-    dist_to_bottom = c - range_bottom
+    near_top = 0 <= (range_top - c) <= edge_band
+    near_bottom = 0 <= (c - range_bottom) <= edge_band
 
-    near_top = dist_to_top >= 0 and dist_to_top <= edge_band
-    near_bottom = dist_to_bottom >= 0 and dist_to_bottom <= edge_band
-
-    # 4) 本根 K 的影线结构
     rng = max(h - l, 1e-12)
-    lower_w = max(min(o, c) - l, 0.0) / rng  # 下影占比
-    upper_w = max(h - max(o, c), 0.0) / rng  # 上影占比
+    body = abs(c - o)
+    lower_w = (min(o, c) - l) / rng
+    upper_w = (h - max(o, c)) / rng
+    body_ratio = body / rng
 
-    # 5) 过滤掉已经确认突破的情况
+    # 实体至少 20%（我不把它改到25%，会太狠）
+    if body_ratio < 0.20:
+        return None, None
+
+    # 避免突破的假信号
     if breakout_up and near_top:
         return None, None
     if breakout_down and near_bottom:
         return None, None
 
-    # 6) 顶部边缘拒绝 → 空
-    #    要求：靠近上沿 + 上影 >= 40% + K 线收回箱体内部（不是收在新高外）
+    # 顶部拒绝（空）
     if near_top:
-        if upper_w >= 0.4 and c < h and c < range_top:
+        # 上影≥45%（原50%太狠）
+        if upper_w >= 0.45 and c < h and (range_top - c) >= atr_abs * 0.15:
             return "range_reject_short", range_top
 
-    # 7) 底部边缘拒绝 → 多
-    #    要求：靠近下沿 + 下影 >= 40% + 收回箱体内部
+    # 底部拒绝（多）
     if near_bottom:
-        if lower_w >= 0.4 and c > l and c > range_bottom:
+        if lower_w >= 0.45 and c > l and (c - range_bottom) >= atr_abs * 0.15:
             return "range_reject_long", range_bottom
 
     return None, None
@@ -1084,7 +1062,7 @@ def signal_exhaustion_reversal(
             return None, None
 
         # 反转确认：阳线 + 有一定涨幅 + 放量
-        if c > o and pct_now >= 0.7 and volr_now >= 1.8:
+        if c > o and pct_now >= 0.4 and volr_now >= 1.5:
             return "exhaustion_reversal_long", c
         return None, None
 
@@ -1096,7 +1074,7 @@ def signal_exhaustion_reversal(
             return None, None
 
         # 反转确认：阴线 + 有一定跌幅 + 放量
-        if c < o and pct_now <= -0.7 and volr_now >= 1.8:
+        if c < o and pct_now <= -0.4 and volr_now >= 1.5:
             return "exhaustion_reversal_short", c
         return None, None
 
@@ -1124,7 +1102,7 @@ def signal_volume_climax(
         return None, None
 
     # 极端放量门槛（可以以后调）
-    if volr_now < 3.0:
+    if volr_now < 2.0:
         return None, None
 
     rng = max(h - l, 1e-12)
@@ -1132,8 +1110,8 @@ def signal_volume_climax(
     lower_w = max(min(o, c) - l, 0.0) / rng
     upper_w = max(h - max(o, c), 0.0) / rng
 
-    # 要求整根 K 的波动至少 >= 1.2 * ATR
-    if rng < atr_abs * 1.2:
+    # 要求整根 K 的波动至少 >= 1.0 * ATR
+    if rng < atr_abs * 1.0:
         return None, None
 
     # --- 下跌趋势中的“底部高潮反转 · 多” ---
@@ -1190,7 +1168,7 @@ def signal_rubber_band(
         # 距 EMA20 至少 2 ATR，向下过度扩展
         if dist_pct <= -2.0 * atr_pct:
             # 当前 K 为阳线 + 有一定涨幅
-            if c > o and pct_now >= 0.5:
+            if c > o and pct_now >= 0.5 and volr_now >= 1.5:
                 return "rubber_band_long", ema20_h4
 
     # --- 空头结构下：拉过头，可能回落 ---
@@ -1198,7 +1176,7 @@ def signal_rubber_band(
         # 距 EMA20 至少 2 ATR，向上过度扩展
         if dist_pct >= 2.0 * atr_pct:
             # 当前 K 为阴线 + 有一定跌幅
-            if c < o and pct_now <= -0.5:
+            if c < o and pct_now <= -0.5 and volr_now >= 1.5:
                 return "rubber_band_short", ema20_h4
 
     return None, None
@@ -1213,10 +1191,10 @@ def detect_double_top_bottom(
     *,
     min_bars_between: int = 3,
     max_bars_between: int = 40,
-    max_top_diff_pct: float = 0.6,  # 两个顶/底收盘价高度差 ≤0.6%
-    min_leg_depth_atr: float = 0.8,  # 中间那一笔回落/反弹 ≥ 0.8 ATR
+    max_top_diff_pct: float = 1.2,  # 两个顶/底收盘价高度差 ≤0.6%
+    min_leg_depth_atr: float = 0.4,  # 中间那一笔回落/反弹 ≥ 0.8 ATR
     min_leg_depth_pct: float = 1.0,  # 或 ≥1%
-    min_break_neck_pct: float = 0.2,  # 突破颈线至少 0.2%
+    min_break_neck_pct: float = 0.1,  # 突破颈线至少 0.2%
 ) -> Tuple[bool, bool]:
     """
     使用原来的 swing_high / swing_low（基于 close）做 pivot，
@@ -1284,7 +1262,7 @@ def detect_double_top_bottom(
                                 r1 = float(v1_raw)
                                 r2 = float(v2_raw)
                                 # 稍微给 rsi 一点容错
-                                rsi_div = r2 <= r1 + 0.5
+                                rsi_div = r2 <= r1 + 1.0
 
                                 if rsi_div:
                                     # 当前价要“有效跌破颈线”
@@ -1327,7 +1305,7 @@ def detect_double_top_bottom(
                                 r1 = float(v1_raw)
                                 r2 = float(v2_raw)
                                 # 第二个底 RSI 不再创新低
-                                rsi_div = r2 >= r1 - 0.5
+                                rsi_div = r2 >= r1 - 1.0
 
                                 if rsi_div:
                                     break_pct = (c / neck_high - 1.0) * 100.0
@@ -1503,15 +1481,15 @@ def signal_squeeze_breakout(
     # 1) 前一段“收缩”：ATR 偏低 + 区间不宽
     #    - ATR_now 明显 < ATR 中位数
     #    - 价格区间 < ~1.5%
-    if not (atr_now < 0.8 * atr_med and range_width_pct < 1.5):
+    if not (atr_now < 1.0 * atr_med and range_width_pct < 1.5):
         return None, None
 
     # 2) 当前一根“扩张”：波动 & 量能明显放大
     rng_now = h - l
-    if not (rng_now > 1.2 * atr_med and volr_now >= 2.0):
+    if not (rng_now > 1.0 * atr_med and volr_now >= 1.5):
         return None, None
 
-    buf = 0.0015  # 0.15% 容差
+    buf = 0.0005  # 0.05% 容差
 
     # 向上突破
     if c > range_high * (1.0 + buf):
@@ -1529,7 +1507,9 @@ def signal_squeeze_breakout(
 # =========================
 
 
-def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
+def detect_signal(
+    ex, symbol, strong_up_map, strong_dn_map, strategy, df_1h=None, df_4h=None
+):
     """
     极简 H1+H4 版信号检测（只用于合约短线）
     信号类型（核心）：
@@ -1549,8 +1529,16 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
 
     # ===== 拉 K 线 =====
     try:
-        h1_full = fetch_ohlcv_df(ex, symbol, "1h", limit=288)
-        h4 = fetch_ohlcv_df(ex, symbol, "4h", limit=160)
+        # 优先使用传入的 df（用于单点/批量回测）
+        if df_1h is not None:
+            h1_full = df_1h.copy()
+        else:
+            h1_full = fetch_ohlcv_df(ex, symbol, "1h", limit=288)
+
+        if df_4h is not None:
+            h4 = df_4h.copy()
+        else:
+            h4 = fetch_ohlcv_df(ex, symbol, "4h", limit=160)
     except Exception as e:
         dbg(f"[DETECT] {symbol}: fetch_ohlcv failed: {e}")
         return False, None
@@ -1672,13 +1660,13 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     else:
         ema20_h4 = ema50_h4 = np.nan
 
+    # 高周期“结构方向”：只看 EMA 排列，不强制当前价在 EMA 上/下
     HTF_BULL = (
         isinstance(ema20_h4, (int, float))
         and isinstance(ema50_h4, (int, float))
         and not np.isnan(ema20_h4)
         and not np.isnan(ema50_h4)
         and ema20_h4 >= ema50_h4
-        and c >= ema20_h4
     )
     HTF_BEAR = (
         isinstance(ema20_h4, (int, float))
@@ -1686,7 +1674,6 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         and not np.isnan(ema20_h4)
         and not np.isnan(ema50_h4)
         and ema20_h4 <= ema50_h4
-        and c <= ema20_h4
     )
     htf_gate = "BULL" if HTF_BULL else ("BEAR" if HTF_BEAR else "")
 
@@ -1752,8 +1739,8 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     reasons = []
 
     # 1) 1h 区间高低
-    HH_WIN = 20
-    LL_WIN = 20
+    HH_WIN = 30
+    LL_WIN = 30
     if len(hist) >= max(HH_WIN, LL_WIN):
         hh = float(hist["high"].tail(HH_WIN).max())
         ll = float(hist["low"].tail(LL_WIN).min())
@@ -1761,16 +1748,28 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         hh = float(hist["high"].max())
         ll = float(hist["low"].min())
 
-    BREAK_BUF = 0.002  # 0.2%
+    BREAK_BUF = 0.004  # 0.2%
 
     # 2) 本根 K 的影线比例
     rng = max(h - l, 1e-12)
     lower_w = max(min(o, c) - l, 0.0) / rng  # 下影线占比
     upper_w = max(h - max(o, c), 0.0) / rng  # 上影线占比
+    body = abs(c - o)
+    body_ratio = body / rng  # 实体占整根K的比例
 
     # 3) 基础四类信号：区间突破 + 极端长影线
-    breakout_up = c >= hh * (1.0 + BREAK_BUF)
-    breakout_down = c <= ll * (1.0 - BREAK_BUF)
+    breakout_up = (
+        c >= hh * (1.0 + BREAK_BUF)
+        and body_ratio >= 0.4
+        and (h - c) / rng <= 0.25
+        and volr_now >= 1.0
+    )
+    breakout_down = (
+        c <= ll * (1.0 - BREAK_BUF)
+        and body_ratio >= 0.4
+        and (c - l) / rng <= 0.25
+        and volr_now >= 1.0
+    )
 
     wick_bottom = (
         (lower_w >= 0.6)
@@ -1797,24 +1796,23 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     near_ema20_h4 = (
         isinstance(ema20_h4, (int, float))
         and not np.isnan(ema20_h4)
-        and c > 0
-        and abs(c - ema20_h4) / c <= 0.01  # 距 4h EMA20 在 1% 内
+        and abs(c - ema20_h4) / c <= 0.008  # 0.6% -> **0.8%**（中度）
     )
 
     trend_pullback_long = (
         HTF_BULL
         and near_ema20_h4
-        and pct_now > 0
-        and lower_w >= 0.3
-        and volr_now >= 0.8
+        and pct_now >= 0.25  # 0.35 太狠 → 改到 0.25%
+        and lower_w >= 0.33  # 0.4 太狠 → 改到 0.33
+        and volr_now >= 0.9  # 1.0 稍微严格 → 改回 0.9
     )
 
     trend_pullback_short = (
         HTF_BEAR
         and near_ema20_h4
-        and pct_now < 0
-        and upper_w >= 0.3
-        and volr_now >= 0.8
+        and pct_now <= -0.25
+        and upper_w >= 0.33
+        and volr_now >= 0.9
     )
 
     # ===== 新信号 2：突破后的回踩确认（breakout + retest）=====
@@ -2009,8 +2007,8 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         "double_bottom": 0,
         "breakout_retest_long": 1,
         "breakout_retest_short": 1,
-        "breakout_up": 2,
-        "breakout_down": 2,
+        "breakout_up": 3,
+        "breakout_down": 3,
         "htf_trend_pullback_long": 3,
         "htf_trend_pullback_short": 3,
         "exhaustion_reversal_long": 3,
@@ -2045,6 +2043,8 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
             "double_bottom",
             "volume_climax_long",
             "rubber_band_long",
+            "hidden_div_long",
+            "squeeze_breakout_up",
         )
         else "short"
     )
@@ -2077,9 +2077,9 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
         f"1h 涨跌 {pct_now:.2f}%  VolR≈{volr_now:.2f}x  Bar≈${eq_now_bar_usd:,.0f}"
     )
     if HTF_BULL:
-        reasons.append("HTF=BULL（4h EMA20≥50，价格在 EMA 上方）")
+        reasons.append("HTF=BULL（4h EMA20≥EMA50，多头结构）")
     elif HTF_BEAR:
-        reasons.append("HTF=BEAR（4h EMA20≤50，价格在 EMA 下方）")
+        reasons.append("HTF=BEAR（4h EMA20≤EMA50，空头结构）")
     if near_R is not None and dist_R is not None:
         reasons.append(f"上方阻力≈{near_R:.6g}（ΔR≈{dist_R:.2f}%）")
     if near_S is not None and dist_S is not None:
@@ -2163,3 +2163,76 @@ def detect_signal(ex, symbol, strong_up_map, strong_dn_map, strategy):
     )
 
     return True, payload
+
+
+# =========================
+# 单点 / 批量回测入口
+# =========================
+
+if __name__ == "__main__":
+    import ccxt
+    import time
+
+    print("=== detect_signal 单点/批量回测模式 ===")
+
+    # ===== 配置 =====
+    symbol = input("输入交易对 (例如 BTC/USDT): ").strip() or "BTC/USDT"
+    days = int(input("回测多少天？(默认30): ") or "30")
+    verbose = input("是否输出所有K线 (y/n)? 默认 n: ").strip().lower() == "y"
+
+    # ===== 初始化交易所 =====
+    ex = ccxt.binance({"enableRateLimit": True})
+
+    print(f"拉取 {symbol} {days} 天数据中...")
+    ms_per_h = 3600 * 1000
+    since_ms = int(time.time() * 1000 - days * 24 * ms_per_h)
+
+    # 获取 1h & 4h 全历史
+    df_1h_all = fetch_ohlcv_df(ex, symbol, "1h", limit=24 * days + 288)
+    df_4h_all = fetch_ohlcv_df(ex, symbol, "4h", limit=6 * days + 160)
+
+    if df_1h_all is None or df_1h_all.empty:
+        print("❌ 无法获取 1h K 线数据")
+        exit()
+
+    print(f"完成，1h 共 {len(df_1h_all)} 根")
+
+    # 模拟 detect_signal 滑动窗口
+    print("\n=== 开始回测 ===")
+    print("时间戳\t\t信号\t方向\t价格")
+
+    strong_up = {}
+    strong_dn = {}
+    strategy = None  # 你没用到，直接留空
+
+    # 你 detect_signal 用的是 tail(160)
+    window = 288
+
+    for i in range(window, len(df_1h_all)):
+        df_1h_slice = df_1h_all.iloc[:i].copy()
+        # 4h 使用对应时间点之前所有bar
+        last_time = df_1h_slice.iloc[-1]["ts"]
+        df_4h_slice = df_4h_all[df_4h_all["ts"] <= last_time].copy()
+
+        ok, payload = detect_signal(
+            ex,
+            symbol,
+            strong_up,
+            strong_dn,
+            strategy,
+            df_1h=df_1h_slice,
+            df_4h=df_4h_slice,
+        )
+
+        ts = df_1h_slice.iloc[-1]["ts"]
+        the_time = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts / 1000))
+
+        if verbose:
+            print(f"{the_time} → 检查完毕，有信号={ok}")
+
+        if ok:
+            print(
+                f"{the_time}\t{payload['kind']}\t"
+                f"{'LONG' if payload['kind'].endswith('long') or payload['kind'] in ['breakout_up', 'double_bottom', 'squeeze_breakout_up'] else 'SHORT'}\t"
+                f"{payload['last_price']:.6g}"
+            )
