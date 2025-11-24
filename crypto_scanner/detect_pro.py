@@ -2179,17 +2179,22 @@ if __name__ == "__main__":
     symbol = input("输入交易对 (例如 BTC/USDT): ").strip() or "BTC/USDT"
     days = int(input("回测多少天？(默认30): ") or "30")
     verbose = input("是否输出所有K线 (y/n)? 默认 n: ").strip().lower() == "y"
+    since = input("起始时间 (YYYY-MM-DD HH:MM) 或留空: ").strip()
+    since_ms = (
+        None
+        if since == ""
+        else int(time.mktime(time.strptime(since, "%Y-%m-%d %H:%M"))) * 1000
+    )
 
     # ===== 初始化交易所 =====
     ex = ccxt.binance({"enableRateLimit": True})
 
     print(f"拉取 {symbol} {days} 天数据中...")
     ms_per_h = 3600 * 1000
-    since_ms = int(time.time() * 1000 - days * 24 * ms_per_h)
 
     # 获取 1h & 4h 全历史
-    df_1h_all = fetch_ohlcv_df(ex, symbol, "1h", limit=24 * days + 288)
-    df_4h_all = fetch_ohlcv_df(ex, symbol, "4h", limit=6 * days + 160)
+    df_1h_all = fetch_ohlcv_df(ex, symbol, "1h", limit=24 * days + 288, since=since_ms)
+    df_4h_all = fetch_ohlcv_df(ex, symbol, "4h", limit=6 * days + 160, since=since_ms)
 
     if df_1h_all is None or df_1h_all.empty:
         print("❌ 无法获取 1h K 线数据")
@@ -2212,6 +2217,7 @@ if __name__ == "__main__":
         df_1h_slice = df_1h_all.iloc[:i].copy()
         # 4h 使用对应时间点之前所有bar
         last_time = df_1h_slice.iloc[-1]["ts"]
+        last_price = df_1h_slice.iloc[-1]["close"]
         df_4h_slice = df_4h_all[df_4h_all["ts"] <= last_time].copy()
 
         ok, payload = detect_signal(
@@ -2233,6 +2239,6 @@ if __name__ == "__main__":
         if ok:
             print(
                 f"{the_time}\t{payload['kind']}\t"
-                f"{'LONG' if payload['kind'].endswith('long') or payload['kind'] in ['breakout_up', 'double_bottom', 'squeeze_breakout_up'] else 'SHORT'}\t"
-                f"{payload['last_price']:.6g}"
+                f"{'LONG' if payload['kind'].endswith('long') or payload['kind'] in ['wick_bottom', 'breakout_up', 'double_bottom', 'squeeze_breakout_up'] else 'SHORT'}\t"
+                f"{last_price:.6g}"
             )

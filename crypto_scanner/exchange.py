@@ -80,7 +80,9 @@ def _set_cached_ohlcv(symbol: str, timeframe: str, limit: int, df):
 
 
 # ====== 你的原有 fetch_ohlcv_df 上加缓存 ======
-def fetch_ohlcv_df(ex, symbol: str, timeframe: str, limit: int = 200):
+def fetch_ohlcv_df(
+    ex, symbol: str, timeframe: str, limit: int = 200, since: int = None
+) -> pd.DataFrame:
     """
     包装 ccxt.fetch_ohlcv 为 DataFrame，增加 5s 内存缓存以减少重复请求。
     缓存键： (symbol, timeframe, limit)
@@ -92,7 +94,7 @@ def fetch_ohlcv_df(ex, symbol: str, timeframe: str, limit: int = 200):
         return cached.copy()
 
     # 2) 真正去拉取
-    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+    raw = ex.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit, since=since)
     # raw: [[ts, open, high, low, close, volume], ...]
     df = pd.DataFrame(raw, columns=["ts", "open", "high", "low", "close", "volume"])
 

@@ -6,7 +6,7 @@ from typing import Dict, Any
 MODE = os.getenv("MODE", "QUIET").strip().upper()
 
 # ======================== Config (Baseline) ========================
-DEBUG = True
+DEBUG = False
 EXCHANGE_ID = "binance"
 MARKET_TYPE = "future"
 QUOTE = "USDT"
